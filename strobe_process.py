@@ -42,10 +42,23 @@ BOOT_OUTPUT_DIR = "/boot/strobe_output"
 # Shared blob helpers
 # ---------------------------------------------------------------------------
 
-def _find_brightest_blob(gray, thresh, min_area):
+def _find_best_blob(gray, thresh, min_area,
+                    last_pos=None, last_seen_age=None,
+                    proximity_weight=0.4, lock_timeout=0.5):
     """
-    Threshold gray, find contours, return the single brightest blob as a dict
-    or None. 'Brightest' = highest mean pixel value inside the bounding rect.
+    Threshold gray, find contours, return the single best blob as a dict or None.
+
+    Scoring blends brightness and spatial proximity to the last known position:
+        score = brightness_norm * (1 - w) + proximity_norm * w
+    where w = proximity_weight * (1 - age / lock_timeout), decaying to 0 once
+    lock_timeout seconds have elapsed since the last detection.  After timeout
+    the selector falls back to pure brightness with no spatial bias.
+
+    Args:
+        last_pos        : (cx, cy) of last confirmed detection, or None
+        last_seen_age   : seconds since last detection, or None
+        proximity_weight: max fraction of score from proximity (0 = brightness only)
+        lock_timeout    : seconds after which proximity bias fully fades out
     """
     _, mask = cv2.threshold(gray, thresh, 255, cv2.THRESH_BINARY)
     kernel = np.ones((3, 3), np.uint8)
@@ -53,8 +66,17 @@ def _find_brightest_blob(gray, thresh, min_area):
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
+    # How much to weight proximity this frame (fades to 0 after lock_timeout)
+    if last_pos is not None and last_seen_age is not None:
+        age_factor = max(0.0, 1.0 - last_seen_age / lock_timeout)
+        w = proximity_weight * age_factor
+    else:
+        w = 0.0
+
+    frame_diag = math.hypot(gray.shape[1], gray.shape[0])
+
     best = None
-    best_brightness = -1.0
+    best_score = -1.0
 
     for cnt in contours:
         if cv2.contourArea(cnt) < min_area:
@@ -69,8 +91,17 @@ def _find_brightest_blob(gray, thresh, min_area):
         roi = gray[by:by + bh, bx:bx + bw]
         brightness = float(np.mean(roi)) if roi.size > 0 else 0.0
 
-        if brightness > best_brightness:
-            best_brightness = brightness
+        b_norm = brightness / 255.0
+
+        if w > 0.0:
+            dist = math.hypot(cx - last_pos[0], cy - last_pos[1])
+            prox_norm = max(0.0, 1.0 - dist / frame_diag)
+            score = b_norm * (1.0 - w) + prox_norm * w
+        else:
+            score = b_norm
+
+        if score > best_score:
+            best_score = score
             best = {"cx": cx, "cy": cy, "brightness": brightness, "bbox": (bx, by, bw, bh)}
 
     return best
@@ -93,10 +124,45 @@ def _make_detection(blob, frame_w, frame_h, extra=None):
 
 
 # ---------------------------------------------------------------------------
+# Shared position tracker (mixed into each detector)
+# ---------------------------------------------------------------------------
+
+class _PositionTracker:
+    """
+    Tracks the last confirmed detection position and time so detectors can
+    pass proximity bias to _find_best_blob.
+    """
+    LOCK_TIMEOUT    = 0.5   # seconds — proximity bias fully fades after this
+    PROXIMITY_WEIGHT = 0.4  # max fraction of score from proximity
+
+    def _init_tracker(self):
+        self._last_pos       = None   # (cx, cy)
+        self._last_seen_time = None   # float timestamp
+
+    def _age(self):
+        if self._last_seen_time is None:
+            return None
+        return time.time() - self._last_seen_time
+
+    def _proximity_kwargs(self):
+        return dict(
+            last_pos=self._last_pos,
+            last_seen_age=self._age(),
+            proximity_weight=self.PROXIMITY_WEIGHT,
+            lock_timeout=self.LOCK_TIMEOUT,
+        )
+
+    def _update_tracker(self, blob):
+        if blob is not None:
+            self._last_pos       = (blob["cx"], blob["cy"])
+            self._last_seen_time = time.time()
+
+
+# ---------------------------------------------------------------------------
 # Mode 1 — Delta (original background-subtraction approach)
 # ---------------------------------------------------------------------------
 
-class DeltaDetector:
+class DeltaDetector(_PositionTracker):
     """
     Detects pixels that are bright in absolute terms AND significantly brighter
     than the running background at that location.
@@ -112,6 +178,7 @@ class DeltaDetector:
         self.delta_thresh = delta_thresh
         self.background_alpha = background_alpha
         self.bg = None
+        self._init_tracker()
 
     def process(self, bgr_frame):
         gray = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2GRAY)
@@ -132,40 +199,28 @@ class DeltaDetector:
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
         mask = cv2.dilate(mask, kernel, iterations=1)
 
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Re-use _find_best_blob on the already-masked gray so contour finding
+        # and proximity scoring are shared. Pass thresh=0 since mask already
+        # encodes the detection condition.
+        masked_gray = cv2.bitwise_and(gray, gray, mask=mask)
+        blob = _find_best_blob(masked_gray, 0, self.min_blob_area, **self._proximity_kwargs())
 
-        best = None
-        best_brightness = -1.0
-        for cnt in contours:
-            if cv2.contourArea(cnt) < self.min_blob_area:
-                continue
-            M = cv2.moments(cnt)
-            if M["m00"] < 1e-6:
-                continue
-            cx = int(M["m10"] / M["m00"])
-            cy = int(M["m01"] / M["m00"])
-            bx, by, bw, bh = cv2.boundingRect(cnt)
-            roi = gray[by:by + bh, bx:bx + bw]
-            brightness = float(np.mean(roi)) if roi.size > 0 else 0.0
-            if brightness > best_brightness:
-                best_brightness = brightness
-                best = {"cx": cx, "cy": cy, "brightness": brightness, "bbox": (bx, by, bw, bh)}
-
-        if not best:
+        if not blob:
             cv2.accumulateWeighted(gray, self.bg, self.background_alpha)
             return []
 
-        return [_make_detection(best, self.w, self.h)]
+        self._update_tracker(blob)
+        return [_make_detection(blob, self.w, self.h)]
 
 
 # ---------------------------------------------------------------------------
 # Mode 2 — Simple (absolute brightness only, no background model)
 # ---------------------------------------------------------------------------
 
-class SimpleDetector:
+class SimpleDetector(_PositionTracker):
     """
     No background model. Any blob above the absolute brightness threshold is
-    a candidate. Returns only the single brightest one.
+    a candidate. Returns only the single best one (brightness + proximity).
     Works regardless of camera motion.
     """
     def __init__(self, frame_width, frame_height,
@@ -174,13 +229,16 @@ class SimpleDetector:
         self.h = frame_height
         self.min_blob_area = min_blob_area
         self.abs_brightness_thresh = abs_brightness_thresh
+        self._init_tracker()
 
     def process(self, bgr_frame):
         gray = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (5, 5), 0)
-        blob = _find_brightest_blob(gray, self.abs_brightness_thresh, self.min_blob_area)
+        blob = _find_best_blob(gray, self.abs_brightness_thresh, self.min_blob_area,
+                               **self._proximity_kwargs())
         if blob is None:
             return []
+        self._update_tracker(blob)
         return [_make_detection(blob, self.w, self.h)]
 
 
@@ -188,11 +246,11 @@ class SimpleDetector:
 # Mode 3 — Flicker (temporal FFT, motion-invariant)
 # ---------------------------------------------------------------------------
 
-class FlickerDetector:
+class FlickerDetector(_PositionTracker):
     """
-    Tracks the brightest bright-blob each frame and builds a brightness time
-    series. Confirms as a strobe only if that signal has a dominant frequency
-    in the target band (default 1–4 Hz centred at 2.5 Hz).
+    Tracks the best blob each frame (brightness + proximity) and builds a
+    brightness time series. Confirms as a strobe only if that signal has a
+    dominant frequency in the target band (default 1–4 Hz centred at 2.5 Hz).
 
     Requires ~2 seconds of history before first confirmation, so the first
     ~60 frames will show no detection.
@@ -210,12 +268,13 @@ class FlickerDetector:
         self.hz_tolerance = hz_tolerance
         self.history_s = history_s
         self.min_history_s = min_history_s
-        self.peak_ratio_thresh = peak_ratio_thresh  # fraction of AC power in target band
+        self.peak_ratio_thresh = peak_ratio_thresh
+        self._init_tracker()
 
         # Ring buffers — sized after first frame when fps is known
         self._fps = None
-        self._brightness_history = deque()   # float, 0 when nothing detected
-        self._blob_history = deque()          # blob dict or None
+        self._brightness_history = deque()
+        self._blob_history = deque()
 
     def _init_buffers(self, fps):
         self._fps = fps
@@ -230,18 +289,18 @@ class FlickerDetector:
         gray = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (5, 5), 0)
 
-        blob = _find_brightest_blob(gray, self.abs_brightness_thresh, self.min_blob_area)
+        blob = _find_best_blob(gray, self.abs_brightness_thresh, self.min_blob_area,
+                               **self._proximity_kwargs())
+        self._update_tracker(blob)
         self._brightness_history.append(blob["brightness"] if blob else 0.0)
         self._blob_history.append(blob)
 
         # Not enough history yet
-        min_frames = int(self._fps * self.min_history_s)
-        if len(self._brightness_history) < min_frames:
+        if len(self._brightness_history) < int(self._fps * self.min_history_s):
             return []
 
         signal = np.array(self._brightness_history, dtype=np.float32)
 
-        # Reject if nothing has ever been bright in this window
         if signal.max() < self.abs_brightness_thresh * 0.7:
             return []
 
@@ -258,14 +317,13 @@ class FlickerDetector:
             return []
 
         band_power  = fft_mag[in_band].max()
-        total_power = fft_mag[1:].sum()   # exclude DC bin
+        total_power = fft_mag[1:].sum()
 
         if total_power < 1e-6 or (band_power / total_power) < self.peak_ratio_thresh:
             return []
 
         detected_hz = float(freqs[in_band][np.argmax(fft_mag[in_band])])
 
-        # Return the most recent actual blob position
         for blob in reversed(self._blob_history):
             if blob is not None:
                 return [_make_detection(blob, self.w, self.h, extra={"freq_hz": detected_hz})]
