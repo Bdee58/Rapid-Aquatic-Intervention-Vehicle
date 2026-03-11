@@ -27,6 +27,12 @@ import numpy as np
 
 RECORDINGS_DIR = os.path.expanduser("~/strobe_recordings")
 
+# Annotated outputs go to the boot partition — visible on any computer when
+# the SD card is plugged in. Bullseye: /boot/strobe_output
+# Bookworm: /boot/firmware/strobe_output
+# Check yours: lsblk -o NAME,MOUNTPOINT | grep boot
+OUTPUT_DIR = "/boot/strobe_output"
+
 
 # ---------------------------------------------------------------------------
 # Strobe detection
@@ -193,7 +199,7 @@ def pick_files_interactive():
     for i, name in enumerate(files):
         path = os.path.join(RECORDINGS_DIR, name)
         size_mb = os.path.getsize(path) / 1e6
-        annotated = os.path.exists(path.replace(".avi", "_annotated.avi"))
+        annotated = os.path.exists(os.path.join(OUTPUT_DIR, name.replace(".avi", "_annotated.avi")))
         tag = "  [already processed]" if annotated else ""
         print(f"  [{i + 1}] {name}  ({size_mb:.1f} MB){tag}")
 
@@ -222,7 +228,9 @@ def pick_files_interactive():
 # ---------------------------------------------------------------------------
 
 def process_video(input_path):
-    out_path = input_path.replace(".avi", "_annotated.avi")
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    basename = os.path.splitext(os.path.basename(input_path))[0]
+    out_path = os.path.join(OUTPUT_DIR, f"{basename}_annotated.avi")
 
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
@@ -289,7 +297,7 @@ def main():
         targets = [
             os.path.join(RECORDINGS_DIR, f)
             for f in list_recordings()
-            if not os.path.exists(os.path.join(RECORDINGS_DIR, f.replace(".avi", "_annotated.avi")))
+            if not os.path.exists(os.path.join(OUTPUT_DIR, f.replace(".avi", "_annotated.avi")))
         ]
         if not targets:
             print("Nothing to process.")
