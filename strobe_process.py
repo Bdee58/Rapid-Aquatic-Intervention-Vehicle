@@ -27,11 +27,11 @@ import numpy as np
 
 RECORDINGS_DIR = os.path.expanduser("~/strobe_recordings")
 
-# Annotated outputs go to the boot partition — visible on any computer when
-# the SD card is plugged in. Bullseye: /boot/strobe_output
-# Bookworm: /boot/firmware/strobe_output
-# Check yours: lsblk -o NAME,MOUNTPOINT | grep boot
-OUTPUT_DIR = "/boot/strobe_output"
+# Annotated outputs are written here first (ext4, reliable), then copied to
+# the boot partition so they're visible when the SD card is plugged into a laptop.
+# Bullseye: /boot/strobe_output   Bookworm: /boot/firmware/strobe_output
+OUTPUT_DIR      = os.path.expanduser("~/strobe_processed")
+BOOT_OUTPUT_DIR = "/boot/strobe_output"
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +298,16 @@ def process_video(input_path):
     elapsed = time.time() - t_start
     size_mb = os.path.getsize(out_path) / 1e6 if os.path.exists(out_path) else 0
     print(f"  Done in {elapsed:.1f}s — {n_detections} strobe detections — saved {size_mb:.1f} MB → {out_path}")
+
+    # Copy to boot partition so it's visible when SD card is plugged into a laptop
+    try:
+        import shutil
+        os.makedirs(BOOT_OUTPUT_DIR, exist_ok=True)
+        boot_dest = os.path.join(BOOT_OUTPUT_DIR, os.path.basename(out_path))
+        shutil.copy2(out_path, boot_dest)
+        print(f"  Copied to boot → {boot_dest}")
+    except Exception as e:
+        print(f"  Warning: could not copy to boot partition ({e})")
 
 
 # ---------------------------------------------------------------------------
