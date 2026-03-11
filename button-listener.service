@@ -1,0 +1,24 @@
+[Unit]
+Description=Strobe detector button listener
+# Start after the OS is up enough to access GPIO; no network needed
+After=multi-user.target
+
+[Service]
+Type=simple
+User=pi
+Group=gpio
+
+# Expand ~ manually — systemd does not interpolate home-dir shortcuts
+WorkingDirectory=/home/pi/Rapid-Aquatic-Intervention-Vehicle
+ExecStart=/usr/bin/python3 /home/pi/Rapid-Aquatic-Intervention-Vehicle/button_listener.py
+
+# Restart automatically if it crashes (but not on a clean exit/stop)
+Restart=on-failure
+RestartSec=5
+
+# Log to journald (view with: journalctl -u button-listener -f)
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
