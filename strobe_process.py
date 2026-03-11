@@ -4,14 +4,21 @@ strobe_process.py
 
 Offline strobe detection processor.
 Reads a recorded .avi from ~/strobe_recordings/, runs strobe detection on
-every frame, and writes an annotated output video alongside the original.
+every frame, and writes an annotated output video.
+
+Detection modes (--mode):
+  delta    — original: bright AND brighter-than-background (default)
+  simple   — absolute brightness threshold only, no background model
+  flicker  — tracks brightness over time, confirms via FFT at target Hz
+
+All modes return at most ONE detection per frame (the brightest candidate).
 
 Run:
-  python3 strobe_process.py            # interactive file picker
-  python3 strobe_process.py file.avi   # process specific file(s) directly
-  python3 strobe_process.py --all      # process all unprocessed recordings
-
-Output is saved as  <original_name>_annotated.avi  in the same directory.
+  python3 strobe_process.py                        # interactive picker, delta mode
+  python3 strobe_process.py --mode flicker         # flicker mode
+  python3 strobe_process.py --mode simple          # simple mode
+  python3 strobe_process.py file.avi               # specific file
+  python3 strobe_process.py --all                  # all unprocessed
 
 Requires:
   sudo apt install -y python3-opencv python3-numpy
@@ -24,30 +31,80 @@ import math
 import time
 import argparse
 import numpy as np
+from collections import deque
 
-RECORDINGS_DIR = os.path.expanduser("~/strobe_recordings")
-
-# Annotated outputs are written here first (ext4, reliable), then copied to
-# the boot partition so they're visible when the SD card is plugged into a laptop.
-# Bullseye: /boot/strobe_output   Bookworm: /boot/firmware/strobe_output
+RECORDINGS_DIR  = os.path.expanduser("~/strobe_recordings")
 OUTPUT_DIR      = os.path.expanduser("~/strobe_processed")
 BOOT_OUTPUT_DIR = "/boot/strobe_output"
 
 
 # ---------------------------------------------------------------------------
-# Strobe detection
+# Shared blob helpers
 # ---------------------------------------------------------------------------
 
-class StrobeDetector:
-    def __init__(
-        self,
-        frame_width,
-        frame_height,
-        min_blob_area=8,
-        abs_brightness_thresh=200,
-        delta_thresh=70,
-        background_alpha=0.025,
-    ):
+def _find_brightest_blob(gray, thresh, min_area):
+    """
+    Threshold gray, find contours, return the single brightest blob as a dict
+    or None. 'Brightest' = highest mean pixel value inside the bounding rect.
+    """
+    _, mask = cv2.threshold(gray, thresh, 255, cv2.THRESH_BINARY)
+    kernel = np.ones((3, 3), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    best = None
+    best_brightness = -1.0
+
+    for cnt in contours:
+        if cv2.contourArea(cnt) < min_area:
+            continue
+        M = cv2.moments(cnt)
+        if M["m00"] < 1e-6:
+            continue
+
+        cx = int(M["m10"] / M["m00"])
+        cy = int(M["m01"] / M["m00"])
+        bx, by, bw, bh = cv2.boundingRect(cnt)
+        roi = gray[by:by + bh, bx:bx + bw]
+        brightness = float(np.mean(roi)) if roi.size > 0 else 0.0
+
+        if brightness > best_brightness:
+            best_brightness = brightness
+            best = {"cx": cx, "cy": cy, "brightness": brightness, "bbox": (bx, by, bw, bh)}
+
+    return best
+
+
+def _make_detection(blob, frame_w, frame_h, extra=None):
+    cx, cy = blob["cx"], blob["cy"]
+    dx = cx - frame_w / 2.0
+    dy = frame_h / 2.0 - cy      # flip y: up = positive
+    det = {
+        "cx": cx, "cy": cy,
+        "r":     math.hypot(dx, dy),
+        "theta": math.degrees(math.atan2(dy, dx)),
+        "brightness": blob["brightness"],
+        "bbox": blob["bbox"],
+    }
+    if extra:
+        det.update(extra)
+    return det
+
+
+# ---------------------------------------------------------------------------
+# Mode 1 — Delta (original background-subtraction approach)
+# ---------------------------------------------------------------------------
+
+class DeltaDetector:
+    """
+    Detects pixels that are bright in absolute terms AND significantly brighter
+    than the running background at that location.
+    Assumes a mostly static camera.
+    """
+    def __init__(self, frame_width, frame_height,
+                 min_blob_area=8, abs_brightness_thresh=200,
+                 delta_thresh=70, background_alpha=0.025):
         self.w = frame_width
         self.h = frame_height
         self.min_blob_area = min_blob_area
@@ -57,13 +114,6 @@ class StrobeDetector:
         self.bg = None
 
     def process(self, bgr_frame):
-        """
-        Returns a list of detections (may be empty). Each detection is a dict:
-            cx, cy      : blob centroid (pixels)
-            r, theta    : polar coords relative to frame centre (px, degrees)
-            brightness  : mean pixel value inside bounding rect
-            bbox        : (x, y, w, h) bounding rect
-        """
         gray = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (5, 5), 0)
 
@@ -84,92 +134,185 @@ class StrobeDetector:
 
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        detections = []
+        best = None
+        best_brightness = -1.0
         for cnt in contours:
-            area = cv2.contourArea(cnt)
-            if area < self.min_blob_area:
+            if cv2.contourArea(cnt) < self.min_blob_area:
                 continue
-
             M = cv2.moments(cnt)
             if M["m00"] < 1e-6:
                 continue
-
             cx = int(M["m10"] / M["m00"])
             cy = int(M["m01"] / M["m00"])
-
-            # Polar coords relative to frame centre (right = 0°, CCW positive)
-            dx = cx - self.w / 2.0
-            dy = self.h / 2.0 - cy          # flip y so up is positive
-            r     = math.hypot(dx, dy)
-            theta = math.degrees(math.atan2(dy, dx))
-
-            # Brightness: mean inside bounding rect
             bx, by, bw, bh = cv2.boundingRect(cnt)
             roi = gray[by:by + bh, bx:bx + bw]
             brightness = float(np.mean(roi)) if roi.size > 0 else 0.0
+            if brightness > best_brightness:
+                best_brightness = brightness
+                best = {"cx": cx, "cy": cy, "brightness": brightness, "bbox": (bx, by, bw, bh)}
 
-            detections.append({
-                "cx": cx, "cy": cy,
-                "r": r, "theta": theta,
-                "brightness": brightness,
-                "bbox": (bx, by, bw, bh),
-                "area": area,
-            })
-
-        # Only update background on frames with no detections so strobes don't
-        # get absorbed into the background model.
-        if not detections:
+        if not best:
             cv2.accumulateWeighted(gray, self.bg, self.background_alpha)
+            return []
 
-        return detections
+        return [_make_detection(best, self.w, self.h)]
+
+
+# ---------------------------------------------------------------------------
+# Mode 2 — Simple (absolute brightness only, no background model)
+# ---------------------------------------------------------------------------
+
+class SimpleDetector:
+    """
+    No background model. Any blob above the absolute brightness threshold is
+    a candidate. Returns only the single brightest one.
+    Works regardless of camera motion.
+    """
+    def __init__(self, frame_width, frame_height,
+                 min_blob_area=8, abs_brightness_thresh=200):
+        self.w = frame_width
+        self.h = frame_height
+        self.min_blob_area = min_blob_area
+        self.abs_brightness_thresh = abs_brightness_thresh
+
+    def process(self, bgr_frame):
+        gray = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+        blob = _find_brightest_blob(gray, self.abs_brightness_thresh, self.min_blob_area)
+        if blob is None:
+            return []
+        return [_make_detection(blob, self.w, self.h)]
+
+
+# ---------------------------------------------------------------------------
+# Mode 3 — Flicker (temporal FFT, motion-invariant)
+# ---------------------------------------------------------------------------
+
+class FlickerDetector:
+    """
+    Tracks the brightest bright-blob each frame and builds a brightness time
+    series. Confirms as a strobe only if that signal has a dominant frequency
+    in the target band (default 1–4 Hz centred at 2.5 Hz).
+
+    Requires ~2 seconds of history before first confirmation, so the first
+    ~60 frames will show no detection.
+    """
+    def __init__(self, frame_width, frame_height,
+                 min_blob_area=8, abs_brightness_thresh=200,
+                 target_hz=2.5, hz_tolerance=1.5,
+                 history_s=3.0, min_history_s=2.0,
+                 peak_ratio_thresh=0.25):
+        self.w = frame_width
+        self.h = frame_height
+        self.min_blob_area = min_blob_area
+        self.abs_brightness_thresh = abs_brightness_thresh
+        self.target_hz = target_hz
+        self.hz_tolerance = hz_tolerance
+        self.history_s = history_s
+        self.min_history_s = min_history_s
+        self.peak_ratio_thresh = peak_ratio_thresh  # fraction of AC power in target band
+
+        # Ring buffers — sized after first frame when fps is known
+        self._fps = None
+        self._brightness_history = deque()   # float, 0 when nothing detected
+        self._blob_history = deque()          # blob dict or None
+
+    def _init_buffers(self, fps):
+        self._fps = fps
+        max_len = int(fps * self.history_s)
+        self._brightness_history = deque(maxlen=max_len)
+        self._blob_history = deque(maxlen=max_len)
+
+    def process(self, bgr_frame, fps=30.0):
+        if self._fps is None:
+            self._init_buffers(fps)
+
+        gray = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+
+        blob = _find_brightest_blob(gray, self.abs_brightness_thresh, self.min_blob_area)
+        self._brightness_history.append(blob["brightness"] if blob else 0.0)
+        self._blob_history.append(blob)
+
+        # Not enough history yet
+        min_frames = int(self._fps * self.min_history_s)
+        if len(self._brightness_history) < min_frames:
+            return []
+
+        signal = np.array(self._brightness_history, dtype=np.float32)
+
+        # Reject if nothing has ever been bright in this window
+        if signal.max() < self.abs_brightness_thresh * 0.7:
+            return []
+
+        # FFT on mean-subtracted signal (removes DC / constant lights)
+        ac = signal - signal.mean()
+        fft_mag = np.abs(np.fft.rfft(ac))
+        freqs   = np.fft.rfftfreq(len(signal), d=1.0 / self._fps)
+
+        lo = self.target_hz - self.hz_tolerance
+        hi = self.target_hz + self.hz_tolerance
+        in_band = (freqs >= lo) & (freqs <= hi)
+
+        if not in_band.any():
+            return []
+
+        band_power  = fft_mag[in_band].max()
+        total_power = fft_mag[1:].sum()   # exclude DC bin
+
+        if total_power < 1e-6 or (band_power / total_power) < self.peak_ratio_thresh:
+            return []
+
+        detected_hz = float(freqs[in_band][np.argmax(fft_mag[in_band])])
+
+        # Return the most recent actual blob position
+        for blob in reversed(self._blob_history):
+            if blob is not None:
+                return [_make_detection(blob, self.w, self.h, extra={"freq_hz": detected_hz})]
+
+        return []
 
 
 # ---------------------------------------------------------------------------
 # Annotation
 # ---------------------------------------------------------------------------
 
-# Colour scheme
-BOX_COLOR    = (0,   0,   255)   # red
-TEXT_COLOR   = (0,   255, 255)   # yellow
-CENTRE_COLOR = (255, 255, 255)   # white
-
-FONT       = cv2.FONT_HERSHEY_SIMPLEX
-FONT_SCALE = 0.45
-THICKNESS  = 1
+BOX_COLOR    = (0,   0,   255)
+TEXT_COLOR   = (0,   255, 255)
+CENTRE_COLOR = (255, 255, 255)
+FONT         = cv2.FONT_HERSHEY_SIMPLEX
+FONT_SCALE   = 0.45
+THICKNESS    = 1
 
 
 def annotate_frame(frame, detections, frame_w, frame_h):
     out = frame.copy()
 
-    # Frame-centre crosshair
     cx0, cy0 = frame_w // 2, frame_h // 2
     cv2.line(out, (cx0 - 12, cy0), (cx0 + 12, cy0), CENTRE_COLOR, 1)
     cv2.line(out, (cx0, cy0 - 12), (cx0, cy0 + 12), CENTRE_COLOR, 1)
 
     for det in detections:
         bx, by, bw, bh = det["bbox"]
-
-        # Bounding box
         cv2.rectangle(out, (bx, by), (bx + bw, by + bh), BOX_COLOR, 2)
 
-        # Label lines — stacked above the box, or below if near top edge
         label_lines = [
             f"r={det['r']:.1f}px  {det['theta']:.1f}deg",
             f"bright={det['brightness']:.0f}",
         ]
+        if "freq_hz" in det:
+            label_lines.append(f"flicker={det['freq_hz']:.2f}Hz")
 
         line_h = 16
         label_top = by - len(label_lines) * line_h - 4
         if label_top < 0:
-            label_top = by + bh + 4   # flip below box
+            label_top = by + bh + 4
 
         for i, text in enumerate(label_lines):
             y = label_top + i * line_h
-            # Shadow for readability
             cv2.putText(out, text, (bx + 1, y + 1), FONT, FONT_SCALE, (0, 0, 0), THICKNESS + 1, cv2.LINE_AA)
             cv2.putText(out, text, (bx,     y),     FONT, FONT_SCALE, TEXT_COLOR,  THICKNESS,     cv2.LINE_AA)
 
-        # Line from centre to blob
         cv2.line(out, (cx0, cy0), (det["cx"], det["cy"]), BOX_COLOR, 1, cv2.LINE_AA)
 
     return out
@@ -182,11 +325,10 @@ def annotate_frame(frame, detections, frame_w, frame_h):
 def list_recordings():
     if not os.path.isdir(RECORDINGS_DIR):
         return []
-    files = sorted(
+    return sorted(
         f for f in os.listdir(RECORDINGS_DIR)
         if f.lower().endswith(".avi") and "_annotated" not in f
     )
-    return files
 
 
 def pick_files_interactive():
@@ -199,8 +341,8 @@ def pick_files_interactive():
     for i, name in enumerate(files):
         path = os.path.join(RECORDINGS_DIR, name)
         size_mb = os.path.getsize(path) / 1e6
-        annotated = os.path.exists(os.path.join(OUTPUT_DIR, name.replace(".avi", "_annotated.avi")))
-        tag = "  [already processed]" if annotated else ""
+        done = os.path.exists(os.path.join(OUTPUT_DIR, name.replace(".avi", "_annotated.avi")))
+        tag = "  [already processed]" if done else ""
         print(f"  [{i + 1}] {name}  ({size_mb:.1f} MB){tag}")
 
     print("\nEnter numbers to process (space-separated), or 'all': ", end="", flush=True)
@@ -228,14 +370,8 @@ def pick_files_interactive():
 # ---------------------------------------------------------------------------
 
 def open_writer(out_path, fps, width, height):
-    """Try codecs in order, return (writer, actual_path) or (None, None)."""
-    candidates = [
-        ("XVID", ".avi"),
-        ("mp4v", ".mp4"),
-        ("MJPG", ".avi"),
-    ]
     base = os.path.splitext(out_path)[0]
-    for fourcc_str, ext in candidates:
+    for fourcc_str, ext in [("XVID", ".avi"), ("mp4v", ".mp4"), ("MJPG", ".avi")]:
         path = base + ext
         writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*fourcc_str), fps, (width, height))
         if writer.isOpened():
@@ -245,7 +381,16 @@ def open_writer(out_path, fps, width, height):
     return None, None
 
 
-def process_video(input_path):
+def build_detector(mode, width, height):
+    if mode == "simple":
+        return SimpleDetector(frame_width=width, frame_height=height)
+    elif mode == "flicker":
+        return FlickerDetector(frame_width=width, frame_height=height)
+    else:
+        return DeltaDetector(frame_width=width, frame_height=height)
+
+
+def process_video(input_path, mode="delta"):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     basename = os.path.splitext(os.path.basename(input_path))[0]
     out_path = os.path.join(OUTPUT_DIR, f"{basename}_annotated.avi")
@@ -262,17 +407,19 @@ def process_video(input_path):
 
     writer, out_path = open_writer(out_path, fps, width, height)
     if writer is None:
-        print(f"ERROR: no working video codec found — install libxvidcore or libx264")
+        print("ERROR: no working video codec found — install libxvidcore or libx264")
         cap.release()
         return
 
-    detector = StrobeDetector(frame_width=width, frame_height=height)
+    detector = build_detector(mode, width, height)
 
-    print(f"\nProcessing: {os.path.basename(input_path)}")
+    print(f"\nProcessing: {os.path.basename(input_path)}  [mode={mode}]")
     print(f"  {width}x{height}  {fps:.1f}fps  {total} frames → {os.path.basename(out_path)}")
+    if mode == "flicker":
+        print(f"  Note: first ~{int(fps * 2)} frames will show no detection (building history)")
 
-    t_start   = time.time()
-    frame_idx = 0
+    t_start      = time.time()
+    frame_idx    = 0
     n_detections = 0
 
     while True:
@@ -280,26 +427,27 @@ def process_video(input_path):
         if not ret:
             break
 
-        detections = detector.process(frame)
+        if mode == "flicker":
+            detections = detector.process(frame, fps=fps)
+        else:
+            detections = detector.process(frame)
+
         n_detections += len(detections)
-        annotated = annotate_frame(frame, detections, width, height)
-        writer.write(annotated)
+        writer.write(annotate_frame(frame, detections, width, height))
 
         frame_idx += 1
         if frame_idx % 100 == 0 or frame_idx == total:
             pct = 100 * frame_idx / total if total else 0
             elapsed = time.time() - t_start
-            fps_actual = frame_idx / elapsed if elapsed > 0 else 0
-            print(f"  {frame_idx}/{total}  ({pct:.0f}%)  {fps_actual:.1f} fps processing")
+            print(f"  {frame_idx}/{total}  ({pct:.0f}%)  {frame_idx/elapsed:.1f} fps processing")
 
     cap.release()
     writer.release()
 
     elapsed = time.time() - t_start
     size_mb = os.path.getsize(out_path) / 1e6 if os.path.exists(out_path) else 0
-    print(f"  Done in {elapsed:.1f}s — {n_detections} strobe detections — saved {size_mb:.1f} MB → {out_path}")
+    print(f"  Done in {elapsed:.1f}s — {n_detections} detections — {size_mb:.1f} MB → {out_path}")
 
-    # Copy to boot partition so it's visible when SD card is plugged into a laptop
     try:
         import shutil
         os.makedirs(BOOT_OUTPUT_DIR, exist_ok=True)
@@ -316,8 +464,10 @@ def process_video(input_path):
 
 def main():
     parser = argparse.ArgumentParser(description="Offline strobe detection annotator")
-    parser.add_argument("files",  nargs="*", help="video file(s) to process (default: interactive picker)")
-    parser.add_argument("--all",  action="store_true", help="process all unprocessed recordings non-interactively")
+    parser.add_argument("files",   nargs="*", help="video file(s) to process")
+    parser.add_argument("--all",   action="store_true", help="process all unprocessed recordings")
+    parser.add_argument("--mode",  choices=["delta", "simple", "flicker"], default="delta",
+                        help="detection mode (default: delta)")
     args = parser.parse_args()
 
     if args.all:
@@ -332,7 +482,6 @@ def main():
     elif args.files:
         targets = []
         for f in args.files:
-            # Accept bare filename (assumed in RECORDINGS_DIR) or full path
             if os.path.isabs(f) or os.path.exists(f):
                 targets.append(f)
             else:
@@ -348,7 +497,7 @@ def main():
         if not os.path.exists(path):
             print(f"File not found: {path}")
             continue
-        process_video(path)
+        process_video(path, mode=args.mode)
 
     print("\nAll done.")
 
