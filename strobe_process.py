@@ -227,6 +227,24 @@ def pick_files_interactive():
 # Processing
 # ---------------------------------------------------------------------------
 
+def open_writer(out_path, fps, width, height):
+    """Try codecs in order, return (writer, actual_path) or (None, None)."""
+    candidates = [
+        ("XVID", ".avi"),
+        ("mp4v", ".mp4"),
+        ("MJPG", ".avi"),
+    ]
+    base = os.path.splitext(out_path)[0]
+    for fourcc_str, ext in candidates:
+        path = base + ext
+        writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*fourcc_str), fps, (width, height))
+        if writer.isOpened():
+            print(f"  Codec: {fourcc_str} → {os.path.basename(path)}")
+            return writer, path
+        writer.release()
+    return None, None
+
+
 def process_video(input_path):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     basename = os.path.splitext(os.path.basename(input_path))[0]
@@ -242,10 +260,9 @@ def process_video(input_path):
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total  = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    fourcc = cv2.VideoWriter_fourcc(*"MJPG")
-    writer = cv2.VideoWriter(out_path, fourcc, fps, (width, height))
-    if not writer.isOpened():
-        print(f"ERROR: cannot open VideoWriter for {out_path}")
+    writer, out_path = open_writer(out_path, fps, width, height)
+    if writer is None:
+        print(f"ERROR: no working video codec found — install libxvidcore or libx264")
         cap.release()
         return
 
