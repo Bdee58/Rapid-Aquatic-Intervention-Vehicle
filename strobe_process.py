@@ -44,8 +44,8 @@ class StrobeDetector:
         frame_width,
         frame_height,
         min_blob_area=8,
-        abs_brightness_thresh=185,
-        delta_thresh=40,
+        abs_brightness_thresh=200,
+        delta_thresh=70,
         background_alpha=0.025,
     ):
         self.w = frame_width
