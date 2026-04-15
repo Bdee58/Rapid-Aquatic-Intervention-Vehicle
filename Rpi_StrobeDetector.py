@@ -20,11 +20,34 @@ import sys
 import cv2
 import time
 import argparse
+import threading
 import numpy as np
 from datetime import datetime
 from picamera2 import Picamera2
+import RPi.GPIO as GPIO
 
 RECORDINGS_DIR = os.path.expanduser("~/strobe_recordings")
+LED_PIN = 15  # BCM — physical pin 22
+
+
+class LEDBlinker(threading.Thread):
+    """Blinks an output GPIO pin at a fixed rate until stop() is called."""
+    def __init__(self, pin: int, hz: float = 4.0):
+        super().__init__(daemon=True)
+        self._pin  = pin
+        self._half = max(0.05, 0.5 / hz)
+        self._stop = threading.Event()
+
+    def run(self):
+        state = False
+        while not self._stop.is_set():
+            state = not state
+            GPIO.output(self._pin, GPIO.HIGH if state else GPIO.LOW)
+            time.sleep(self._half)
+        GPIO.output(self._pin, GPIO.LOW)  # ensure LED off on exit
+
+    def stop(self):
+        self._stop.set()
 
 
 def build_camera(width, height, fps):
@@ -67,7 +90,13 @@ def main():
 
     picam2 = build_camera(args.width, args.height, args.fps)
 
-    print(f"Recording {args.duration:.0f}s → {out_path}")
+    # --- LED setup ---
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setup(LED_PIN, GPIO.OUT, initial=GPIO.LOW)
+    blinker = LEDBlinker(LED_PIN, hz=4.0)
+    blinker.start()
+
+    print(f"Recording {args.duration:.0f}s → {out_path}  (LED on GPIO{LED_PIN} blinking)")
 
     frame_count = 0
     t_start = time.time()
@@ -90,6 +119,9 @@ def main():
     except KeyboardInterrupt:
         print("\nStopped early by user.")
     finally:
+        blinker.stop()
+        blinker.join(timeout=1.0)
+        GPIO.cleanup()
         picam2.stop()
         writer.release()
         elapsed = time.time() - t_start
