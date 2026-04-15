@@ -9,8 +9,8 @@ LED:    GPIO15 (active high, external current-limiting resistor required)
 import RPi.GPIO as GPIO
 import time
 
-BUTTON_PIN = 14
-LED_PIN = 15
+BUTTON_PIN = 18  # GPIO14/15 are UART TX/RX — edge detection fails on them
+LED_PIN    = 15
 
 BLINK_ON_S  = 0.3   # seconds LED stays on
 BLINK_OFF_S = 0.3   # seconds LED stays off

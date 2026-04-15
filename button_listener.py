@@ -22,7 +22,7 @@ import subprocess
 import RPi.GPIO as GPIO
 
 # --- Config ---
-BUTTON_PIN  = 14   # BCM — physical pin 8
+BUTTON_PIN  = 18   # BCM — physical pin 12 (GPIO14/15 are UART TX/RX, can't use edge detection)
 LED_PIN     = 15   # BCM — physical pin 22
 DEBOUNCE_MS = 300
 SCRIPT_PATH = os.path.expanduser(
@@ -120,7 +120,7 @@ def main():
     GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
     led = ExternalLED(LED_PIN)
 
-    log.info("Listening on GPIO%d (physical pin 8). Waiting for button press...", BUTTON_PIN)
+    log.info("Listening on GPIO%d (physical pin 12). Waiting for button press...", BUTTON_PIN)
 
     try:
         while True:
