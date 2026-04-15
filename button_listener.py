@@ -120,22 +120,19 @@ def main():
     GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
     led = ExternalLED(LED_PIN)
 
-    GPIO.add_event_detect(
-        BUTTON_PIN,
-        GPIO.FALLING,
-        callback=on_button_press,
-        bouncetime=DEBOUNCE_MS,
-    )
-
     log.info("Listening on GPIO%d (physical pin 8). Waiting for button press...", BUTTON_PIN)
 
     try:
         while True:
-            time.sleep(0.5)
+            # wait_for_edge is compatible with GPIO14/15 on all Pi OS versions;
+            # add_event_detect fails on Bookworm with those pins.
+            channel = GPIO.wait_for_edge(BUTTON_PIN, GPIO.FALLING, timeout=1000)
+            if channel is not None:
+                on_button_press(channel)
     except KeyboardInterrupt:
         log.info("Shutting down.")
     finally:
-        led.off()      # ensure LED is low before releasing the pin
+        led.off()
         GPIO.cleanup()
 
 
