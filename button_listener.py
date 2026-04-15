@@ -21,7 +21,8 @@ import subprocess
 import RPi.GPIO as GPIO
 
 # --- Config ---
-BUTTON_PIN   = 14   # BCM numbering — change to 17 if that's your actual wiring
+BUTTON_PIN   = 14   # BCM — physical pin 8
+LED_PIN      = 15   # BCM — physical pin 22
 DEBOUNCE_MS  = 300
 BLINK_HZ     = 4.0  # LED blink rate while recording
 SCRIPT_PATH  = os.path.expanduser(
@@ -39,37 +40,14 @@ log = logging.getLogger(__name__)
 # LED
 # ---------------------------------------------------------------------------
 
-class OnboardLED:
-    """Controls the Pi ACT LED via /sys/class/leds."""
-    def __init__(self):
-        self.led_path = self._find_led_path()
-        self.brightness_path = os.path.join(self.led_path, "brightness") if self.led_path else None
-        self.trigger_path    = os.path.join(self.led_path, "trigger")    if self.led_path else None
-        if self.trigger_path and os.path.exists(self.trigger_path):
-            self._write(self.trigger_path, "none")
-
-    def _find_led_path(self):
-        for c in ["/sys/class/leds/led0", "/sys/class/leds/ACT", "/sys/class/leds/act"]:
-            if os.path.isdir(c):
-                return c
-        root = "/sys/class/leds"
-        if os.path.isdir(root):
-            for name in os.listdir(root):
-                p = os.path.join(root, name)
-                if os.path.isdir(p) and os.path.exists(os.path.join(p, "brightness")):
-                    return p
-        return None
-
-    def _write(self, path, value):
-        try:
-            with open(path, "w") as f:
-                f.write(str(value))
-        except Exception as e:
-            log.warning("LED write failed: %s", e)
+class ExternalLED:
+    """Controls an external LED wired to a GPIO output pin."""
+    def __init__(self, pin: int):
+        self.pin = pin
+        GPIO.setup(pin, GPIO.OUT, initial=GPIO.LOW)
 
     def set(self, on: bool):
-        if self.brightness_path:
-            self._write(self.brightness_path, "1" if on else "0")
+        GPIO.output(self.pin, GPIO.HIGH if on else GPIO.LOW)
 
     def off(self):
         self.set(False)
@@ -77,7 +55,7 @@ class OnboardLED:
 
 class LEDBlinker(threading.Thread):
     """Blinks the LED at a fixed rate until stop() is called."""
-    def __init__(self, led: OnboardLED, hz: float):
+    def __init__(self, led: ExternalLED, hz: float):
         super().__init__(daemon=True)
         self._led  = led
         self._hz   = hz
@@ -100,7 +78,7 @@ class LEDBlinker(threading.Thread):
 # Button handler
 # ---------------------------------------------------------------------------
 
-led     = OnboardLED()
+led     = None  # initialised in main() after GPIO.setmode()
 current_proc    = None
 current_blinker = None
 
@@ -144,12 +122,15 @@ def on_button_press(channel):
 
 
 def main():
+    global led
+
     if not os.path.exists(SCRIPT_PATH):
         log.error("Script not found: %s", SCRIPT_PATH)
         sys.exit(1)
 
     GPIO.setmode(GPIO.BCM)
     GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    led = ExternalLED(LED_PIN)
     GPIO.add_event_detect(
         BUTTON_PIN,
         GPIO.FALLING,
