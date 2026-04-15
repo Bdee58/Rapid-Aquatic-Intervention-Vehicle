@@ -2,12 +2,12 @@
 """
 button_listener.py
 
-Waits for a button press on GPIO14 (BCM) / physical pin 8.
-Button should be wired between GPIO14 and GND (internal pull-up enabled —
+Waits for a button press on GPIO18 (BCM) / physical pin 12.
+Button should be wired between GPIO18 and GND (internal pull-up enabled —
 press pulls the pin LOW → falling edge triggers launch).
 
-On press: flashes the LED 3× to confirm, then launches Rpi_StrobeDetector.py.
-LED blinking during recording is handled by Rpi_StrobeDetector.py itself.
+On press: launches Rpi_StrobeDetector.py with --no-led, and blinks GPIO15 LED
+here while the recording runs. button_listener owns GPIO15 exclusively.
 Ignores presses while a recording is already running.
 
 Runs on boot via systemd — see button-listener.service.
@@ -22,9 +22,9 @@ import subprocess
 import RPi.GPIO as GPIO
 
 # --- Config ---
-BUTTON_PIN  = 18   # BCM — physical pin 12 (GPIO14/15 are UART TX/RX, can't use edge detection)
+BUTTON_PIN  = 18   # BCM — physical pin 12
 LED_PIN     = 15   # BCM — physical pin 22
-DEBOUNCE_MS = 300
+BLINK_HZ    = 4.0
 SCRIPT_PATH = os.path.expanduser(
     "~/Rapid-Aquatic-Intervention-Vehicle/Rpi_StrobeDetector.py"
 )
@@ -37,11 +37,10 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# LED helpers
+# LED
 # ---------------------------------------------------------------------------
 
 class ExternalLED:
-    """Controls an external LED wired to a GPIO output pin."""
     def __init__(self, pin: int):
         self.pin = pin
         GPIO.setup(pin, GPIO.OUT, initial=GPIO.LOW)
@@ -53,53 +52,75 @@ class ExternalLED:
         self.set(False)
 
 
-def confirmation_flash(led: ExternalLED, n: int = 3) -> None:
-    """Flash LED n times quickly to acknowledge the button press.
+class LEDBlinker(threading.Thread):
+    """Blinks the LED at a fixed rate until stop() is called."""
+    def __init__(self, led: ExternalLED, hz: float):
+        super().__init__(daemon=True)
+        self._led  = led
+        self._hz   = hz
+        self._stop = threading.Event()
 
-    Runs in a short daemon thread so the interrupt callback returns immediately.
-    Rpi_StrobeDetector.py will take over the pin once it starts.
-    """
-    def _flash():
-        for _ in range(n):
-            led.set(True)
-            time.sleep(0.10)
-            led.set(False)
-            time.sleep(0.10)
-    threading.Thread(target=_flash, daemon=True).start()
+    def run(self):
+        half = max(0.05, 0.5 / self._hz)
+        state = False
+        while not self._stop.is_set():
+            state = not state
+            self._led.set(state)
+            time.sleep(half)
+        self._led.off()
+
+    def stop(self):
+        self._stop.set()
 
 
 # ---------------------------------------------------------------------------
 # Button handler
 # ---------------------------------------------------------------------------
 
-_lock        = threading.Lock()   # guards current_proc
-led          = None               # set in main() after GPIO.setmode()
-current_proc = None
+_lock           = threading.Lock()
+led             = None   # set in main() after GPIO.setmode()
+current_proc    = None
+current_blinker = None
+
+
+def _monitor(proc, blinker):
+    """Wait for recording process to exit, then stop the blinker."""
+    proc.wait()
+    blinker.stop()
+    blinker.join()
+    log.info("Recording finished (PID %d) — LED off.", proc.pid)
 
 
 def on_button_press(channel):
-    global current_proc
+    global current_proc, current_blinker
 
     with _lock:
-        # Ignore press if a recording is still running
         if current_proc is not None and current_proc.poll() is None:
             log.info("Button pressed — recording already in progress, ignoring.")
             return
 
         log.info("Button pressed — launching %s", SCRIPT_PATH)
 
-        if led is not None:
-            confirmation_flash(led)
-
         try:
             current_proc = subprocess.Popen(
-                [sys.executable, SCRIPT_PATH],
+                [sys.executable, SCRIPT_PATH, "--no-led"],
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,   # capture stderr for logging
+                stderr=subprocess.PIPE,
             )
             log.info("Launched PID %d", current_proc.pid)
 
-            # Log any startup errors from the child without blocking
+            # Blink LED here — strobe detector skips GPIO with --no-led
+            current_blinker = LEDBlinker(led, BLINK_HZ)
+            current_blinker.start()
+
+            # Background thread stops the blinker when recording ends
+            threading.Thread(
+                target=_monitor,
+                args=(current_proc, current_blinker),
+                daemon=True,
+            ).start()
+
+            # Log child stderr without blocking
             def _log_stderr(proc):
                 for line in proc.stderr:
                     log.warning("[strobe] %s", line.decode(errors="replace").rstrip())
@@ -124,14 +145,15 @@ def main():
 
     try:
         while True:
-            # wait_for_edge is compatible with GPIO14/15 on all Pi OS versions;
-            # add_event_detect fails on Bookworm with those pins.
             channel = GPIO.wait_for_edge(BUTTON_PIN, GPIO.FALLING, timeout=1000)
             if channel is not None:
                 on_button_press(channel)
     except KeyboardInterrupt:
         log.info("Shutting down.")
     finally:
+        if current_blinker is not None:
+            current_blinker.stop()
+            current_blinker.join(timeout=1.0)
         led.off()
         GPIO.cleanup()
 

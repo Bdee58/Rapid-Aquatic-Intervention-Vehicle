@@ -75,6 +75,8 @@ def main():
     parser.add_argument("--height",   type=int,   default=240)
     parser.add_argument("--fps",      type=int,   default=30)
     parser.add_argument("--duration", type=float, default=30.0, help="recording duration in seconds")
+    parser.add_argument("--no-led",  action="store_true",
+                        help="skip GPIO LED (use when launched from button_listener.py which owns the pin)")
     args = parser.parse_args()
 
     os.makedirs(RECORDINGS_DIR, exist_ok=True)
@@ -90,13 +92,16 @@ def main():
 
     picam2 = build_camera(args.width, args.height, args.fps)
 
-    # --- LED setup ---
-    GPIO.setmode(GPIO.BCM)
-    GPIO.setup(LED_PIN, GPIO.OUT, initial=GPIO.LOW)
-    blinker = LEDBlinker(LED_PIN, hz=4.0)
-    blinker.start()
-
-    print(f"Recording {args.duration:.0f}s → {out_path}  (LED on GPIO{LED_PIN} blinking)")
+    # --- LED setup (skipped if --no-led, e.g. when launched from button_listener) ---
+    blinker = None
+    if not args.no_led:
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(LED_PIN, GPIO.OUT, initial=GPIO.LOW)
+        blinker = LEDBlinker(LED_PIN, hz=4.0)
+        blinker.start()
+        print(f"Recording {args.duration:.0f}s → {out_path}  (LED on GPIO{LED_PIN} blinking)")
+    else:
+        print(f"Recording {args.duration:.0f}s → {out_path}")
 
     frame_count = 0
     t_start = time.time()
@@ -119,9 +124,10 @@ def main():
     except KeyboardInterrupt:
         print("\nStopped early by user.")
     finally:
-        blinker.stop()
-        blinker.join(timeout=1.0)
-        GPIO.cleanup()
+        if blinker is not None:
+            blinker.stop()
+            blinker.join(timeout=1.0)
+            GPIO.cleanup()
         picam2.stop()
         writer.release()
         elapsed = time.time() - t_start
