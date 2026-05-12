@@ -44,7 +44,9 @@ BOOT_OUTPUT_DIR = "/boot/strobe_output"
 
 def _find_best_blob(gray, thresh, min_area,
                     last_pos=None, last_seen_age=None,
-                    proximity_weight=0.4, lock_timeout=0.5):
+                    proximity_weight=0.4, lock_timeout=0.5,
+                    min_circularity=0.5,
+                    dark_surround_thresh=60, surround_margin=12):
     """
     Threshold gray, find contours, return the single best blob as a dict or None.
 
@@ -53,6 +55,11 @@ def _find_best_blob(gray, thresh, min_area,
     where w = proximity_weight * (1 - age / lock_timeout), decaying to 0 once
     lock_timeout seconds have elapsed since the last detection.  After timeout
     the selector falls back to pure brightness with no spatial bias.
+
+    Filters:
+        min_circularity     : reject blobs below 4π·area/perimeter² (0=off, 1=perfect circle)
+        dark_surround_thresh: reject blobs whose surround ring mean brightness exceeds this (0=off)
+        surround_margin     : pixel width of the ring sampled outside the bounding box
 
     Args:
         last_pos        : (cx, cy) of last confirmed detection, or None
@@ -74,13 +81,25 @@ def _find_best_blob(gray, thresh, min_area,
         w = 0.0
 
     frame_diag = math.hypot(gray.shape[1], gray.shape[0])
+    img_h, img_w = gray.shape
 
     best = None
     best_score = -1.0
 
     for cnt in contours:
-        if cv2.contourArea(cnt) < min_area:
+        area = cv2.contourArea(cnt)
+        if area < min_area:
             continue
+
+        # --- Circularity filter ---
+        if min_circularity > 0:
+            perimeter = cv2.arcLength(cnt, True)
+            if perimeter < 1e-6:
+                continue
+            circularity = 4 * math.pi * area / (perimeter ** 2)
+            if circularity < min_circularity:
+                continue
+
         M = cv2.moments(cnt)
         if M["m00"] < 1e-6:
             continue
@@ -88,6 +107,20 @@ def _find_best_blob(gray, thresh, min_area,
         cx = int(M["m10"] / M["m00"])
         cy = int(M["m01"] / M["m00"])
         bx, by, bw, bh = cv2.boundingRect(cnt)
+
+        # --- Dark surround filter ---
+        if dark_surround_thresh > 0:
+            x0 = max(0, bx - surround_margin)
+            y0 = max(0, by - surround_margin)
+            x1 = min(img_w, bx + bw + surround_margin)
+            y1 = min(img_h, by + bh + surround_margin)
+            ring_mask = np.zeros(gray.shape, dtype=np.uint8)
+            ring_mask[y0:y1, x0:x1] = 255
+            ring_mask[by:by + bh, bx:bx + bw] = 0
+            ring_pixels = gray[ring_mask > 0]
+            if ring_pixels.size > 0 and ring_pixels.mean() > dark_surround_thresh:
+                continue
+
         roi = gray[by:by + bh, bx:bx + bw]
         brightness = float(np.mean(roi)) if roi.size > 0 else 0.0
 
@@ -390,6 +423,34 @@ def list_recordings():
 
 
 def pick_files_interactive():
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+
+        initial = RECORDINGS_DIR if os.path.isdir(RECORDINGS_DIR) else os.path.expanduser("~")
+        paths = filedialog.askopenfilenames(
+            title="Select video file(s) to process",
+            initialdir=initial,
+            filetypes=[("AVI files", "*.avi"), ("MP4 files", "*.mp4"), ("All files", "*.*")],
+        )
+        root.destroy()
+
+        if not paths:
+            print("No files selected.")
+            return []
+
+        return list(paths)
+
+    except Exception as e:
+        print(f"GUI file picker unavailable ({e}), falling back to terminal picker.")
+        return _pick_files_terminal()
+
+
+def _pick_files_terminal():
     files = list_recordings()
     if not files:
         print(f"No recordings found in {RECORDINGS_DIR}")
@@ -399,7 +460,7 @@ def pick_files_interactive():
     for i, name in enumerate(files):
         path = os.path.join(RECORDINGS_DIR, name)
         size_mb = os.path.getsize(path) / 1e6
-        done = os.path.exists(os.path.join(OUTPUT_DIR, name.replace(".avi", "_annotated.avi")))
+        done = os.path.exists(os.path.join(RECORDINGS_DIR, name.replace(".avi", "_annotated.avi")))
         tag = "  [already processed]" if done else ""
         print(f"  [{i + 1}] {name}  ({size_mb:.1f} MB){tag}")
 
@@ -449,9 +510,9 @@ def build_detector(mode, width, height):
 
 
 def process_video(input_path, mode="delta"):
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    input_dir = os.path.dirname(os.path.abspath(input_path))
     basename = os.path.splitext(os.path.basename(input_path))[0]
-    out_path = os.path.join(OUTPUT_DIR, f"{basename}_annotated.avi")
+    out_path = os.path.join(input_dir, f"{basename}_annotated.avi")
 
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
@@ -462,6 +523,12 @@ def process_video(input_path, mode="delta"):
     width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total  = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    # Warn if output already exists (will be overwritten)
+    for ext in (".avi", ".mp4"):
+        candidate = os.path.splitext(out_path)[0] + ext
+        if os.path.exists(candidate):
+            print(f"  Warning: overwriting existing file: {candidate}")
 
     writer, out_path = open_writer(out_path, fps, width, height)
     if writer is None:
@@ -504,16 +571,8 @@ def process_video(input_path, mode="delta"):
 
     elapsed = time.time() - t_start
     size_mb = os.path.getsize(out_path) / 1e6 if os.path.exists(out_path) else 0
-    print(f"  Done in {elapsed:.1f}s — {n_detections} detections — {size_mb:.1f} MB → {out_path}")
-
-    try:
-        import shutil
-        os.makedirs(BOOT_OUTPUT_DIR, exist_ok=True)
-        boot_dest = os.path.join(BOOT_OUTPUT_DIR, os.path.basename(out_path))
-        shutil.copy2(out_path, boot_dest)
-        print(f"  Copied to boot → {boot_dest}")
-    except Exception as e:
-        print(f"  Warning: could not copy to boot partition ({e})")
+    print(f"  Done in {elapsed:.1f}s — {n_detections} detections — {size_mb:.1f} MB")
+    print(f"  Output: {out_path}")
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd \"C:/Users/blake/Documents/2 - UCLA!/MAE162D/Torpedo_Code\" && python -c \"import schemdraw; print\\(schemdraw.__version__\\)\" 2>&1)",
+      "Bash(cd \"C:/Users/blake/Documents/2 - UCLA!/MAE162D/Torpedo_Code\" && pip install schemdraw matplotlib 2>&1 | tail -5)",
+      "Bash(python -c \"import schemdraw; print\\(schemdraw.__version__\\)\" 2>&1)",
+      "Bash(pip install:*)",
+      "Bash(python -c \"import schemdraw; import schemdraw.elements as elm; print\\(schemdraw.__version__\\); attrs = [x for x in dir\\(elm\\) if not x.startswith\\('_'\\)]; print\\(attrs\\)\" 2>&1)",
+      "Bash(python -c \"\nimport schemdraw\nimport schemdraw.elements as elm\nhelp\\(elm.Ic\\)\n\" 2>&1 | head -60)",
+      "Bash(python -c \"\nimport schemdraw\nimport schemdraw.elements as elm\nhelp\\(elm.IcPin\\)\n\" 2>&1 | head -30)"
+    ]
+  }
+}
