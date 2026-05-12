@@ -34,6 +34,7 @@ from PIL import Image, ImageDraw, ImageFont
 from gpiozero import Button
 import adafruit_ssd1306
 import adafruit_ads1x15.ads1115 as ADS
+from adafruit_ads1x15.ads1x15 import P0
 from adafruit_ads1x15.analog_in import AnalogIn
 
 # ---------------------------------------------------------------------------
@@ -67,7 +68,7 @@ i2c  = busio.I2C(board.SCL, board.SDA)
 oled = adafruit_ssd1306.SSD1306_I2C(OLED_WIDTH, OLED_HEIGHT, i2c, addr=OLED_ADDR)
 ads  = ADS.ADS1115(i2c, address=ADS1115_ADDR)
 ads.gain = ADC_GAIN
-chan = AnalogIn(ads, ADS.P0)
+chan = AnalogIn(ads, P0)
 
 font = ImageFont.load_default()
 
