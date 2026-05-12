@@ -152,8 +152,12 @@ def main() -> None:
             dt  = now - last_time
             last_time = now
 
-            v_adc  = chan.voltage
-            v_batt = v_adc / ADC_DIVIDER
+            try:
+                v_adc  = chan.voltage
+                v_batt = v_adc / ADC_DIVIDER
+            except OSError:
+                print("[ADC] I2C read failed — transient bus error, skipping")
+                v_adc, v_batt = 0.0, 0.0
 
             try:
                 pitch, roll, yaw_deg = get_orientation(yaw_deg, dt)
