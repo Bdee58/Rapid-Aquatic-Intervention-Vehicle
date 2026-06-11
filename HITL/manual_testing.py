@@ -111,6 +111,7 @@ btn1 = Button(BTN1_PIN,  pull_up=True, bounce_time=0.05)
 btn2 = Button(BTN2_PIN,  pull_up=True, bounce_time=0.05)
 
 i2c  = busio.I2C(board.SCL, board.SDA)
+time.sleep(0.5)   # let I2C bus settle before hitting devices
 oled = adafruit_ssd1306.SSD1306_I2C(OLED_WIDTH, OLED_HEIGHT, i2c, addr=OLED_ADDR)
 ads  = ADS.ADS1115(i2c, address=ADS1115_ADDR)
 ads.gain = ADC_GAIN
