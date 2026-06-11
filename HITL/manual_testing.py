@@ -38,8 +38,8 @@ ESC pulse mapping (RPi.GPIO PWM, 50 Hz = 20 ms period):
   2000 us  -> 10.0 %  ->  full forward
 
 Install (Pi 5, Bookworm):
-  sudo apt install -y python3-pil python3-smbus python3-rpi.gpio \
-                      i2c-tools python3-lgpio
+  sudo apt install -y python3-pil python3-smbus python3-lgpio \
+                      i2c-tools
   pip3 install adafruit-blinka \
       adafruit-circuitpython-ssd1306 \
       adafruit-circuitpython-ads1x15 \
@@ -50,9 +50,9 @@ Install (Pi 5, Bookworm):
 """
 
 import time
+import lgpio
 import board
 import busio
-import RPi.GPIO as GPIO
 from PIL import Image, ImageDraw, ImageFont
 import adafruit_ssd1306
 import adafruit_ads1x15.ads1115 as ADS
@@ -83,6 +83,7 @@ ADC_GAIN        = 2 / 3  # ADS1115 PGA +/-6.144 V
 ADC_DIVIDER     = 0.137
 
 POLL_INTERVAL_S = 0.05   # 20 Hz
+GPIO_CHIP       = 4      # Pi 5 uses gpiochip4
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -96,19 +97,17 @@ def _duty(us: int) -> float:
 # Hardware init
 # ---------------------------------------------------------------------------
 
-GPIO.setmode(GPIO.BCM)
+h = lgpio.gpiochip_open(GPIO_CHIP)
 
 # Buttons -- pull-up, active LOW
-GPIO.setup(BTN1_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-GPIO.setup(BTN2_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+lgpio.gpio_claim_input(h, BTN1_PIN, lgpio.SET_PULL_UP)
+lgpio.gpio_claim_input(h, BTN2_PIN, lgpio.SET_PULL_UP)
 
 # ESC PWM -- 50 Hz, start at stopped signal
-GPIO.setup(MAIN_ESC_PIN, GPIO.OUT)
-GPIO.setup(YAW_ESC_PIN,  GPIO.OUT)
-main_pwm = GPIO.PWM(MAIN_ESC_PIN, 50)
-yaw_pwm  = GPIO.PWM(YAW_ESC_PIN,  50)
-main_pwm.start(_duty(ESC_STOPPED_US))
-yaw_pwm.start(_duty(ESC_STOPPED_US))
+lgpio.gpio_claim_output(h, MAIN_ESC_PIN)
+lgpio.gpio_claim_output(h, YAW_ESC_PIN)
+lgpio.tx_pwm(h, MAIN_ESC_PIN, 50, _duty(ESC_STOPPED_US))
+lgpio.tx_pwm(h, YAW_ESC_PIN,  50, _duty(ESC_STOPPED_US))
 
 # I2C peripherals
 i2c  = busio.I2C(board.SCL, board.SDA)
@@ -168,16 +167,16 @@ def calibrate_escs() -> None:
     input("[CAL] Press Enter when ESC is unpowered and ready...")
 
     print("[CAL] Setting MAX throttle (2000 us, 10.0%)...")
-    main_pwm.ChangeDutyCycle(_duty(2000))
-    yaw_pwm.ChangeDutyCycle(_duty(2000))
+    lgpio.tx_pwm(h, MAIN_ESC_PIN, 50, _duty(2000))
+    lgpio.tx_pwm(h, YAW_ESC_PIN,  50, _duty(2000))
 
     print("[CAL] --> NOW connect the ESC battery.")
     print("[CAL]     Wait for beeps (cell-count beeps + long beep = entered cal mode).")
     input("[CAL] Press Enter once the ESC has beeped...")
 
     print("[CAL] Setting MIN throttle (1000 us, 5.0%)...")
-    main_pwm.ChangeDutyCycle(_duty(1000))
-    yaw_pwm.ChangeDutyCycle(_duty(1000))
+    lgpio.tx_pwm(h, MAIN_ESC_PIN, 50, _duty(1000))
+    lgpio.tx_pwm(h, YAW_ESC_PIN,  50, _duty(1000))
 
     print("[CAL]     Wait for confirmation beeps (1-2 short beeps).")
     input("[CAL] Press Enter once you hear the confirmation beeps...")
@@ -254,8 +253,8 @@ def main() -> None:
                 v_adc1, v_batt1 = 0.0, 0.0
 
             # --- throttle state: read both buttons simultaneously ---
-            b1 = GPIO.input(BTN1_PIN) == GPIO.LOW
-            b2 = GPIO.input(BTN2_PIN) == GPIO.LOW
+            b1 = lgpio.gpio_read(h, BTN1_PIN) == 0
+            b2 = lgpio.gpio_read(h, BTN2_PIN) == 0
 
             if b1 and b2:
                 thr_us    = THROTTLE_BOTH_US
@@ -269,7 +268,7 @@ def main() -> None:
 
             # only write to ESC when throttle level actually changes
             if thr_us != last_thr_us:
-                main_pwm.ChangeDutyCycle(_duty(thr_us))
+                lgpio.tx_pwm(h, MAIN_ESC_PIN, 50, _duty(thr_us))
                 last_thr_us = thr_us
                 print(f"[THR] {thr_label}  ({thr_us} us, {_duty(thr_us):.1f}%)  |  "
                       f"B0={v_batt0:.2f}V  B1={v_batt1:.2f}V")
@@ -285,12 +284,10 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nShutting down.")
     finally:
-        main_pwm.ChangeDutyCycle(_duty(ESC_STOPPED_US))
-        yaw_pwm.ChangeDutyCycle(_duty(ESC_STOPPED_US))
+        lgpio.tx_pwm(h, MAIN_ESC_PIN, 50, _duty(ESC_STOPPED_US))
+        lgpio.tx_pwm(h, YAW_ESC_PIN,  50, _duty(ESC_STOPPED_US))
         clear_oled()
-        main_pwm.stop()
-        yaw_pwm.stop()
-        GPIO.cleanup()
+        lgpio.gpiochip_close(h)
 
 
 if __name__ == "__main__":
