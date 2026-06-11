@@ -144,6 +144,38 @@ def startup_checks() -> bool:
     return all_ok
 
 # ---------------------------------------------------------------------------
+# ESC calibration
+# ---------------------------------------------------------------------------
+
+def calibrate_escs() -> None:
+    """
+    One-time throttle range calibration. ESC must be UNPOWERED at the start.
+    Teaches the ESC where min (1000us) and max (2000us) are so it arms correctly.
+    Only needs to be done once per ESC -- it saves the range internally.
+    """
+    print("\n[CAL] ========== ESC CALIBRATION ==========")
+    print("[CAL] ESC battery must be DISCONNECTED right now.")
+    input("[CAL] Press Enter when ESC is unpowered and ready...")
+
+    print("[CAL] Setting MAX throttle (2.00 ms) on both ESCs...")
+    main_esc.value = 1.0
+    yaw_esc.value  = 1.0
+
+    print("[CAL] --> NOW connect the ESC battery.")
+    print("[CAL]     Wait for the beep sequence (usually cell-count beeps + long beep).")
+    input("[CAL] Press Enter once the ESC has finished its startup beeps...")
+
+    print("[CAL] Setting MIN throttle (1.00 ms)...")
+    main_esc.value = -1.0
+    yaw_esc.value  = -1.0
+
+    print("[CAL]     Wait for the ESC confirmation beeps (1-2 short beeps).")
+    input("[CAL] Press Enter once you hear the confirmation beeps...")
+
+    print("[CAL] Calibration complete -- ESC now knows the full throttle range.")
+    print("[CAL] ==========================================\n")
+
+# ---------------------------------------------------------------------------
 # OLED
 # ---------------------------------------------------------------------------
 
@@ -184,7 +216,10 @@ def main() -> None:
 
     startup_checks()
 
-    print("[ESC] Sending 1.5 ms neutral pulse -- waiting 3 s for bidirectional ESCs to arm...")
+    if input("Run ESC calibration? (y/N): ").strip().lower() == 'y':
+        calibrate_escs()
+
+    print("[ESC] Sending 1.00 ms min-throttle pulse -- waiting 3 s for ESCs to arm...")
     time.sleep(3.0)
     print("[ESC] Armed. Yaw locked at neutral.\n")
 
