@@ -70,9 +70,9 @@ YAW_ESC_PIN     = 13
 
 # Servo.value maps -1..1 linearly to 1 ms..2 ms (50 Hz PWM).
 # Bidirectional ESC: neutral = 1500 us (value=0.0), forward range 1500-2000 us.
-ESC_STOPPED_VALUE   = -1.0  # 1.00 ms -- min throttle, standard unidirectional ESC arms here
-THROTTLE_ONE_VALUE  = -0.2  # 1.40 ms -- 40% of 1000-2000 us range
-THROTTLE_BOTH_VALUE =  0.6  # 1.80 ms -- 80% of 1000-2000 us range
+ESC_STOPPED_VALUE   =  0.0  # 1.50 ms -- neutral, Apisqueen 100A arms here (bidirectional)
+THROTTLE_ONE_VALUE  =  0.4  # 1.70 ms -- 40% forward
+THROTTLE_BOTH_VALUE =  0.8  # 1.90 ms -- 80% forward
 
 OLED_ADDR       = 0x3C
 OLED_WIDTH      = 128
