@@ -32,9 +32,9 @@ Wiring:
 
 ESC pulse mapping (gpiozero Servo, min_pulse_width=1ms, max_pulse_width=2ms):
   Bidirectional ESC -- neutral = 1500us, arm at neutral.
-  value = -1.0  ->  1.00 ms  ->  min throttle / armed        (ESC_STOPPED_VALUE)
-  value = -0.2  ->  1.40 ms  ->  40% of 1000-2000 us range  (THROTTLE_ONE_VALUE)
-  value =  0.6  ->  1.80 ms  ->  80% of 1000-2000 us range  (THROTTLE_BOTH_VALUE)
+  value = -1.0  ->  1.00 ms  ->  low throttle, ESC arms here  (ESC_STOPPED_VALUE)
+  value = -0.2  ->  1.40 ms  ->  40% of 1000-2000 us range   (THROTTLE_ONE_VALUE)
+  value =  0.6  ->  1.80 ms  ->  80% of 1000-2000 us range   (THROTTLE_BOTH_VALUE)
   value =  1.0  ->  2.00 ms  ->  full throttle
   40%: 1000 + 0.40*1000 = 1400 us  =>  value = (1400-1500)/500 = -0.20
   80%: 1000 + 0.80*1000 = 1800 us  =>  value = (1800-1500)/500 =  0.60
@@ -70,9 +70,9 @@ YAW_ESC_PIN     = 13
 
 # Servo.value maps -1..1 linearly to 1 ms..2 ms (50 Hz PWM).
 # Bidirectional ESC: neutral = 1500 us (value=0.0), forward range 1500-2000 us.
-ESC_STOPPED_VALUE   =  0.0  # 1.50 ms -- neutral, Apisqueen 100A arms here (bidirectional)
-THROTTLE_ONE_VALUE  =  0.4  # 1.70 ms -- 40% forward
-THROTTLE_BOTH_VALUE =  0.8  # 1.90 ms -- 80% forward
+ESC_STOPPED_VALUE   = -1.0  # 1.00 ms -- low throttle, Apisqueen 100A arms here
+THROTTLE_ONE_VALUE  = -0.2  # 1.40 ms -- 40% of 1000-2000 us range
+THROTTLE_BOTH_VALUE =  0.6  # 1.80 ms -- 80% of 1000-2000 us range
 
 OLED_ADDR       = 0x3C
 OLED_WIDTH      = 128
@@ -219,9 +219,10 @@ def main() -> None:
     if input("Run ESC calibration? (y/N): ").strip().lower() == 'y':
         calibrate_escs()
 
-    print("[ESC] Sending 1.00 ms min-throttle pulse -- waiting 3 s for ESCs to arm...")
-    time.sleep(3.0)
-    print("[ESC] Armed. Yaw locked at neutral.\n")
+    print("[ESC] Sending 1.00 ms low-throttle signal -- power on ESC now.")
+    print("[ESC] Listen for the arm beep sequence, then press Enter to continue.")
+    input("[ESC] Press Enter when ESC is armed: ")
+    print("[ESC] Proceeding. Yaw locked at neutral.\n")
 
     last_thr = ESC_STOPPED_VALUE   # track last commanded value to avoid redundant writes
 
