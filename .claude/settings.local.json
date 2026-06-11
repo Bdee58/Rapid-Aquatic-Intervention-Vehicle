@@ -7,7 +7,19 @@
       "Bash(pip install:*)",
       "Bash(python -c \"import schemdraw; import schemdraw.elements as elm; print\\(schemdraw.__version__\\); attrs = [x for x in dir\\(elm\\) if not x.startswith\\('_'\\)]; print\\(attrs\\)\" 2>&1)",
       "Bash(python -c \"\nimport schemdraw\nimport schemdraw.elements as elm\nhelp\\(elm.Ic\\)\n\" 2>&1 | head -60)",
-      "Bash(python -c \"\nimport schemdraw\nimport schemdraw.elements as elm\nhelp\\(elm.IcPin\\)\n\" 2>&1 | head -30)"
+      "Bash(python -c \"\nimport schemdraw\nimport schemdraw.elements as elm\nhelp\\(elm.IcPin\\)\n\" 2>&1 | head -30)",
+      "Bash(cd \"C:\\\\Users\\\\blake\\\\Documents\\\\2 - UCLA!\\\\MAE162D\\\\Torpedo_Code\" && python \"buoyancy calcs.py\" 2>&1 | head -60)",
+      "Bash(cd \"/c/Users/blake/Documents/2 - UCLA!/MAE162D/Torpedo_Code\" && python \"buoyancy calcs.py\" 2>&1 | head -60)",
+      "Bash(cd \"C:\\\\Users\\\\blake\\\\Documents\\\\2 - UCLA!\\\\MAE162D\\\\Torpedo_Code\" && python \"buoyancy calcs.py\" 2>&1 | head -40)",
+      "Read(//c/Users/blake/Documents/2 - UCLA/!/MAE162D/**)",
+      "Bash(python \"buoyancy calcs.py\")",
+      "Bash(MSYS_NO_PATHCONV=1 python \"C:/Users/blake/Documents/2 - UCLA!/MAE162D/Torpedo_Code/buoyancy calcs.py\" 2>&1 | head -50)",
+      "Bash(python \"C:/Users/blake/Documents/2 - UCLA!/MAE162D/Torpedo_Code/buoyancy calcs.py\" 2>&1 | head -50)",
+      "Bash(cmd /c \"python \\\\\"C:\\\\Users\\\\blake\\\\Documents\\\\2 - UCLA!\\\\MAE162D\\\\Torpedo_Code\\\\buoyancy calcs.py\\\\\" 2>&1\" | head -40)",
+      "Bash(cmd /c \"cd /d \\\\\"C:\\\\Users\\\\blake\\\\Documents\\\\2 - UCLA!\\\\MAE162D\\\\Torpedo_Code\\\\\" && python \\\\\"buoyancy calcs.py\\\\\" 2>&1\")",
+      "Bash(cmd /c \"cd /d \\\\\"C:\\\\Users\\\\blake\\\\Documents\\\\2 - UCLA!\\\\MAE162D\\\\Torpedo_Code\\\\\" && python -c \\\\\"import matplotlib; matplotlib.use\\('Agg'\\); exec\\(open\\('buoyancy calcs.py'\\).read\\(\\)\\)\\\\\" 2>&1\")",
+      "Bash(cmd /c \"cd /d \\\\\"C:\\\\Users\\\\blake\\\\Documents\\\\2 - UCLA!\\\\MAE162D\\\\Torpedo_Code\\\\\" && python -c \\\\\"print\\('hello'\\)\\\\\" > out.txt 2>&1 && type out.txt\")",
+      "Bash(powershell -Command \"Set-Location 'C:\\\\Users\\\\blake\\\\Documents\\\\2 - UCLA!\\\\MAE162D\\\\Torpedo_Code'; python -c 'print\\(123\\)'\")"
     ]
   }
 }

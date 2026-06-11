@@ -1,20 +1,27 @@
 #!/usr/bin/env python3
 """
-dry_manual_software_testing.py
+manual_testing.py
 
-Hardware-in-the-loop dry test for the RAIV autonomous underwater scooter.
+HITL manual-throttle test for the RAIV autonomous underwater scooter.
+No autonomy mode, no camera. Both buttons drive the main prop by state
+(throttle follows the button while it is held, not a toggle).
+
+Button logic (state-based, polled every loop cycle):
+  BTN1 (GPIO 4)  held alone  ->  40% forward  (1.70 ms)
+  BTN2 (GPIO 24) held alone  ->  40% forward  (1.70 ms)
+  Both held simultaneously   ->  80% forward  (1.90 ms)
+  Neither held               ->   0% / neutral (1.50 ms)
+
+Yaw ESC (GPIO 13) is locked at neutral (1.50 ms) throughout.
 
 Peripherals tested:
   - ADS1115 ADC   (I2C 0x48): A0 -> battery 0 voltage, A1 -> battery 1 voltage
-  - SSD1306 OLED  (I2C 0x3C, 128x64): displays batteries, mode, IMU orientation
+  - SSD1306 OLED  (I2C 0x3C, 128x64): batteries, throttle state, IMU orientation
   - MPU-6050 IMU  (I2C 0x68): pitch, roll (accel), yaw (gyro integration -- drifts)
-  - GPIO 4  (pin 7 ): manual throttle button -- pull-up, active LOW
-                      press toggles 60% throttle on main prop on/off
-  - GPIO 24 (pin 18): autonomy mode button   -- pull-up, active LOW
-                      press starts 20-second autonomy session
+  - GPIO 4  (pin 7 ): throttle button 1 -- pull-up, active LOW, read while held
+  - GPIO 24 (pin 18): throttle button 2 -- pull-up, active LOW, read while held
   - GPIO 12 (pin 32): main ESC PWM  (50 Hz, 1-2 ms)
-  - GPIO 13 (pin 33): yaw  ESC PWM  (50 Hz, 1-2 ms)
-  - Camera (J3)     : launched via Rpi_StrobeDetector.py subprocess, autonomy only
+  - GPIO 13 (pin 33): yaw  ESC PWM  (50 Hz, 1-2 ms, locked at neutral)
 
 Wiring:
   ADS1115 A0  -> voltage divider output for battery 0
@@ -26,12 +33,13 @@ Wiring:
   ESC signal  -> GPIO 12 / 13 (signal wire; ESCs powered separately)
 
 ESC pulse mapping (gpiozero Servo, min_pulse_width=1ms, max_pulse_width=2ms):
-  Bidirectional ESC (e.g. BlueRobotics BasicESC) -- neutral = 1500us, arm at neutral.
-  value = -1   ->  1.0 ms  ->  full reverse
-  value =  0   ->  1.5 ms  ->  neutral / stopped / armed  (ESC_STOPPED_VALUE)
-  value =  0.6 ->  1.8 ms  ->  60% forward throttle       (MANUAL_THROTTLE_VALUE)
-  value =  1   ->  2.0 ms  ->  full forward throttle
-  60% forward: neutral(1500) + 0.60*(2000-1500) = 1800us  =>  value = (1800-1500)/500 = 0.60
+  Bidirectional ESC -- neutral = 1500us, arm at neutral.
+  value =  0.0  ->  1.50 ms  ->  neutral / stopped / armed  (ESC_STOPPED_VALUE)
+  value =  0.4  ->  1.70 ms  ->  40% forward  (THROTTLE_ONE_VALUE)
+  value =  0.8  ->  1.90 ms  ->  80% forward  (THROTTLE_BOTH_VALUE)
+  value =  1.0  ->  2.00 ms  ->  full forward
+  40%: neutral(1500) + 0.40*(2000-1500) = 1700 us  =>  value = (1700-1500)/500 = 0.40
+  80%: neutral(1500) + 0.80*(2000-1500) = 1900 us  =>  value = (1900-1500)/500 = 0.80
 
 NOTE: All I2C devices must have pull-ups to 3.3V only. Remove onboard pull-up
 resistors from the ADS1115 and MPU-6050 breakout boards if present,
@@ -51,11 +59,7 @@ Install (Pi 5, Bookworm):
 """
 
 import math
-import os
-import sys
-import subprocess
 import time
-import threading
 import board
 import busio
 from PIL import Image, ImageDraw, ImageFont
@@ -69,18 +73,16 @@ from adafruit_ads1x15.analog_in import AnalogIn
 # Config
 # ---------------------------------------------------------------------------
 
-THROTTLE_BTN_PIN      = 4
-AUTONOMY_BTN_PIN      = 24
-MAIN_ESC_PIN          = 12
-YAW_ESC_PIN           = 13
-
-AUTONOMY_DURATION_S   = 20.0
+BTN1_PIN        = 4
+BTN2_PIN        = 24
+MAIN_ESC_PIN    = 12
+YAW_ESC_PIN     = 13
 
 # Servo.value maps -1..1 linearly to 1 ms..2 ms (50 Hz PWM).
-# Bidirectional ESC: neutral=1500us (value=0.0), forward range 1500-2000us.
-# 60% forward: value = 0.60  ->  1.80 ms  (neutral + 60% of forward half)
-MANUAL_THROTTLE_VALUE = 0.60
-ESC_STOPPED_VALUE     = 0.0      # 1.5 ms -- neutral, ESC arms here
+# Bidirectional ESC: neutral = 1500 us (value=0.0), forward range 1500-2000 us.
+ESC_STOPPED_VALUE   = 0.0   # 1.50 ms -- neutral, ESC arms here
+THROTTLE_ONE_VALUE  = 0.4   # 1.70 ms -- 40% forward (one button held)
+THROTTLE_BOTH_VALUE = 0.8   # 1.90 ms -- 80% forward (both buttons held)
 
 OLED_ADDR       = 0x3C
 OLED_WIDTH      = 128
@@ -95,38 +97,18 @@ ADC_GAIN        = 2 / 3  # ADS1115 PGA +/-6.144 V -- required for up to 4.8 V in
 # Measured: adc=3.98V (19.9V displayed at 0.20), DMM=29.0V  =>  3.98/29.0 = 0.137
 ADC_DIVIDER     = 0.137
 
-POLL_INTERVAL_S = 0.5
-BTN_DISPLAY_S   = 1.0    # how long "AUTONOMY" flash stays on OLED after press
+POLL_INTERVAL_S = 0.05   # 20 Hz -- fast enough to feel responsive to button holds
 
 # IMU sanity check: accel magnitude should be close to 1g when stationary
 G_EXPECTED      = 9.81   # m/s^2
 G_TOLERANCE     = 1.5    # m/s^2 -- flag if outside this band
 
-# Rpi_StrobeDetector.py lives one level up from this HITL/ folder
-DETECTOR_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                '..', 'Rpi_StrobeDetector.py')
-
-# ---------------------------------------------------------------------------
-# Shared state
-# ---------------------------------------------------------------------------
-
-_throttle_event = threading.Event()   # set by GPIO 4 press
-_autonomy_event = threading.Event()   # set by GPIO 24 press
-
-_throttle_on       = False
-_autonomy_active   = False
-_autonomy_end_time = 0.0
-_detector_proc     = None   # Popen handle for Rpi_StrobeDetector.py
-
 # ---------------------------------------------------------------------------
 # Hardware init
 # ---------------------------------------------------------------------------
 
-throttle_btn = Button(THROTTLE_BTN_PIN, pull_up=True, bounce_time=0.05)
-autonomy_btn = Button(AUTONOMY_BTN_PIN, pull_up=True, bounce_time=0.05)
-
-throttle_btn.when_pressed = lambda: _throttle_event.set()
-autonomy_btn.when_pressed = lambda: _autonomy_event.set()
+btn1 = Button(BTN1_PIN,  pull_up=True, bounce_time=0.05)
+btn2 = Button(BTN2_PIN,  pull_up=True, bounce_time=0.05)
 
 i2c  = busio.I2C(board.SCL, board.SDA)
 oled = adafruit_ssd1306.SSD1306_I2C(OLED_WIDTH, OLED_HEIGHT, i2c, addr=OLED_ADDR)
@@ -136,7 +118,7 @@ chan_a0 = AnalogIn(ads, 0)   # A0: battery 0
 chan_a1 = AnalogIn(ads, 1)   # A1: battery 1
 mpu  = adafruit_mpu6050.MPU6050(i2c, address=MPU6050_ADDR)
 
-# ESCs -- initial_value=-1 immediately sends 1 ms arming pulse on startup
+# ESCs -- initial_value=ESC_STOPPED_VALUE sends 1.5 ms neutral on startup for arming
 main_esc = Servo(MAIN_ESC_PIN, initial_value=ESC_STOPPED_VALUE,
                  min_pulse_width=1/1000, max_pulse_width=2/1000)
 yaw_esc  = Servo(YAW_ESC_PIN,  initial_value=ESC_STOPPED_VALUE,
@@ -221,13 +203,13 @@ def get_orientation(yaw_deg: float, dt: float) -> tuple[float, float, float]:
 # OLED
 # ---------------------------------------------------------------------------
 
-def draw_oled(v_batt0: float, v_batt1: float, mode_label: str,
+def draw_oled(v_batt0: float, v_batt1: float, thr_label: str,
               pitch: float, roll: float, yaw: float) -> None:
     img  = Image.new("1", (OLED_WIDTH, OLED_HEIGHT))
     draw = ImageDraw.Draw(img)
 
     draw.text((0,  0), f"B0:{v_batt0:5.2f}V B1:{v_batt1:5.2f}V", font=font, fill=255)
-    draw.text((0,  9), f"MODE: {mode_label}",                      font=font, fill=255)
+    draw.text((0,  9), f"THR: {thr_label}",                        font=font, fill=255)
     draw.line([(0, 19), (OLED_WIDTH, 19)], fill=255, width=1)
     draw.text((0, 22), "--- ORIENTATION ---",                       font=font, fill=255)
     draw.text((0, 32), f"P: {pitch:+7.2f} deg",                    font=font, fill=255)
@@ -249,62 +231,27 @@ def clear_oled() -> None:
         pass
 
 # ---------------------------------------------------------------------------
-# Autonomy mode -- strobe detector subprocess
-# ---------------------------------------------------------------------------
-
-def autonomy_start() -> None:
-    global _detector_proc
-    if not os.path.exists(DETECTOR_SCRIPT):
-        print(f"[AUTO] WARNING: Rpi_StrobeDetector.py not found at {DETECTOR_SCRIPT}")
-        return
-    # --no-led: this script owns GPIO; detector must not touch it
-    # --duration: match our autonomy window so it stops naturally
-    _detector_proc = subprocess.Popen(
-        [sys.executable, DETECTOR_SCRIPT,
-         '--no-led', '--duration', str(int(AUTONOMY_DURATION_S))],
-    )
-    print(f"[AUTO] Rpi_StrobeDetector.py started (PID {_detector_proc.pid})")
-
-
-def autonomy_stop() -> None:
-    global _detector_proc
-    if _detector_proc is None:
-        return
-    if _detector_proc.poll() is None:   # still running
-        _detector_proc.terminate()
-        try:
-            _detector_proc.wait(timeout=2.0)
-        except subprocess.TimeoutExpired:
-            _detector_proc.kill()
-    _detector_proc = None
-    print("[AUTO] Strobe detector stopped")
-
-# ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    global _throttle_on, _autonomy_active, _autonomy_end_time
-
-    print("RAIV HITL dry test running. Ctrl-C to quit.")
+    print("RAIV HITL manual test running. Ctrl-C to quit.")
     print(f"  OLED    : SSD1306 128x64 @ I2C 0x{OLED_ADDR:02X}")
     print(f"  ADC     : ADS1115 @ I2C 0x{ADS1115_ADDR:02X}, gain=2/3 (+/-6.144V), divider={ADC_DIVIDER}")
     print(f"            A0=batt0 (~24V nom)  |  A1=batt1 (~14V nom)")
     print(f"  IMU     : MPU-6050 @ I2C 0x{MPU6050_ADDR:02X}  (yaw = gyro integration, drifts)")
-    print(f"  ESC     : main=GPIO{MAIN_ESC_PIN} (pin 32), yaw=GPIO{YAW_ESC_PIN} (pin 33)")
-    print(f"  Buttons : GPIO{THROTTLE_BTN_PIN}=throttle toggle, "
-          f"GPIO{AUTONOMY_BTN_PIN}=autonomy ({AUTONOMY_DURATION_S:.0f}s)")
-    print(f"  Detector: {DETECTOR_SCRIPT}\n")
+    print(f"  ESC     : main=GPIO{MAIN_ESC_PIN} (pin 32), yaw=GPIO{YAW_ESC_PIN} (pin 33, locked)")
+    print(f"  Buttons : GPIO{BTN1_PIN} + GPIO{BTN2_PIN}  (hold for throttle, both = 80%)\n")
 
     startup_checks()
 
     print("[ESC] Sending 1.5 ms neutral pulse -- waiting 3 s for bidirectional ESCs to arm...")
     time.sleep(3.0)
-    print("[ESC] Armed.\n")
+    print("[ESC] Armed. Yaw locked at neutral.\n")
 
-    yaw_deg         = 0.0
-    last_time       = time.monotonic()
-    auto_pressed_at = 0.0   # for OLED "AUTONOMY" flash on button down
+    yaw_deg   = 0.0
+    last_time = time.monotonic()
+    last_thr  = ESC_STOPPED_VALUE   # track last commanded value to avoid redundant writes
 
     try:
         while True:
@@ -333,66 +280,34 @@ def main() -> None:
                 print("[IMU] I2C read failed -- transient bus error, skipping")
                 pitch, roll = 0.0, 0.0
 
-            # --- GPIO 4: manual throttle toggle ---
-            if _throttle_event.is_set():
-                _throttle_event.clear()
-                if _autonomy_active:
-                    print(f"[BTN{THROTTLE_BTN_PIN}] Ignored -- autonomy mode active")
-                else:
-                    _throttle_on = not _throttle_on
-                    main_esc.value = MANUAL_THROTTLE_VALUE if _throttle_on else ESC_STOPPED_VALUE
-                    print(f"[BTN{THROTTLE_BTN_PIN}] Manual throttle "
-                          f"{'ON  (60%, 1.60 ms)' if _throttle_on else 'OFF (stopped, 1.00 ms)'}  |  "
-                          f"B0={v_batt0:.2f}V  B1={v_batt1:.2f}V  "
-                          f"P={pitch:+.2f}  R={roll:+.2f}  Y={yaw_deg:+.2f}")
+            # --- throttle state: read both buttons simultaneously ---
+            b1 = btn1.is_pressed
+            b2 = btn2.is_pressed
 
-            # --- GPIO 24: autonomy mode ---
-            if _autonomy_event.is_set():
-                _autonomy_event.clear()
-                if _autonomy_active:
-                    print(f"[BTN{AUTONOMY_BTN_PIN}] Autonomy already active -- ignoring")
-                else:
-                    _throttle_on       = False
-                    main_esc.value     = ESC_STOPPED_VALUE
-                    _autonomy_active   = True
-                    _autonomy_end_time = time.monotonic() + AUTONOMY_DURATION_S
-                    auto_pressed_at    = time.time()
-                    autonomy_start()
-                    print(f"[BTN{AUTONOMY_BTN_PIN}] *** AUTONOMY MODE ACTIVE -- "
-                          f"{AUTONOMY_DURATION_S:.0f} s ***")
-
-            # --- autonomy expiry check ---
-            if _autonomy_active:
-                remaining = _autonomy_end_time - time.monotonic()
-                if remaining <= 0.0:
-                    _autonomy_active = False
-                    main_esc.value   = ESC_STOPPED_VALUE
-                    yaw_esc.value    = ESC_STOPPED_VALUE
-                    autonomy_stop()
-                    print("[AUTO] *** Autonomy session ended -- returning to STANDBY ***")
-                    remaining = 0.0
-                else:
-                    print(f"[AUTO] {remaining:4.1f}s left  |  "
-                          f"B0={v_batt0:.2f}V  B1={v_batt1:.2f}V  "
-                          f"P={pitch:+.2f}  R={roll:+.2f}  Y={yaw_deg:+.2f}")
+            if b1 and b2:
+                thr_value = THROTTLE_BOTH_VALUE
+                thr_label = "80%  [1+2]"
+            elif b1 or b2:
+                thr_value = THROTTLE_ONE_VALUE
+                thr_label = f"40%  [{'1' if b1 else '2'}]"
             else:
-                print(f"[ADC] B0={v_batt0:.2f}V (adc={v_adc0:.4f}V)  "
-                      f"B1={v_batt1:.2f}V (adc={v_adc1:.4f}V)  |  "
-                      f"[IMU] P={pitch:+.2f}  R={roll:+.2f}  Y={yaw_deg:+.2f}  |  "
-                      f"THR={'ON' if _throttle_on else 'OFF'}")
+                thr_value = ESC_STOPPED_VALUE
+                thr_label = "0%"
 
-            # --- OLED mode label ---
-            if _autonomy_active:
-                remaining = max(0.0, _autonomy_end_time - time.monotonic())
-                mode_label = f"AUTO {remaining:.0f}s"
-            elif (time.time() - auto_pressed_at) < BTN_DISPLAY_S:
-                mode_label = "AUTONOMY"   # brief flash on button down before first poll
-            elif _throttle_on:
-                mode_label = "MAN 60%"
-            else:
-                mode_label = "--"
+            # only write to ESC when throttle level actually changes
+            if thr_value != last_thr:
+                main_esc.value = thr_value
+                last_thr = thr_value
+                print(f"[THR] {thr_label}  ({thr_value:.2f} -> {1500 + thr_value*500:.0f} us)  |  "
+                      f"B0={v_batt0:.2f}V  B1={v_batt1:.2f}V  "
+                      f"P={pitch:+.2f}  R={roll:+.2f}  Y={yaw_deg:+.2f}")
 
-            draw_oled(v_batt0, v_batt1, mode_label, pitch, roll, yaw_deg)
+            print(f"[ADC] B0={v_batt0:.2f}V (adc={v_adc0:.4f}V)  "
+                  f"B1={v_batt1:.2f}V (adc={v_adc1:.4f}V)  |  "
+                  f"[IMU] P={pitch:+.2f}  R={roll:+.2f}  Y={yaw_deg:+.2f}  |  "
+                  f"THR={thr_label}  BTN=[{int(b1)}{int(b2)}]")
+
+            draw_oled(v_batt0, v_batt1, thr_label, pitch, roll, yaw_deg)
 
             time.sleep(POLL_INTERVAL_S)
 
@@ -401,10 +316,9 @@ def main() -> None:
     finally:
         main_esc.value = ESC_STOPPED_VALUE
         yaw_esc.value  = ESC_STOPPED_VALUE
-        autonomy_stop()
         clear_oled()
-        throttle_btn.close()
-        autonomy_btn.close()
+        btn1.close()
+        btn2.close()
         main_esc.close()
         yaw_esc.close()
 
