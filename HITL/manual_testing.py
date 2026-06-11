@@ -32,12 +32,12 @@ Wiring:
 
 ESC pulse mapping (gpiozero Servo, min_pulse_width=1ms, max_pulse_width=2ms):
   Bidirectional ESC -- neutral = 1500us, arm at neutral.
-  value =  0.0  ->  1.50 ms  ->  neutral / stopped / armed  (ESC_STOPPED_VALUE)
-  value =  0.4  ->  1.70 ms  ->  40% forward  (THROTTLE_ONE_VALUE)
-  value =  0.8  ->  1.90 ms  ->  80% forward  (THROTTLE_BOTH_VALUE)
-  value =  1.0  ->  2.00 ms  ->  full forward
-  40%: neutral(1500) + 0.40*(2000-1500) = 1700 us  =>  value = (1700-1500)/500 = 0.40
-  80%: neutral(1500) + 0.80*(2000-1500) = 1900 us  =>  value = (1900-1500)/500 = 0.80
+  value = -1.0  ->  1.00 ms  ->  min throttle / armed        (ESC_STOPPED_VALUE)
+  value = -0.2  ->  1.40 ms  ->  40% of 1000-2000 us range  (THROTTLE_ONE_VALUE)
+  value =  0.6  ->  1.80 ms  ->  80% of 1000-2000 us range  (THROTTLE_BOTH_VALUE)
+  value =  1.0  ->  2.00 ms  ->  full throttle
+  40%: 1000 + 0.40*1000 = 1400 us  =>  value = (1400-1500)/500 = -0.20
+  80%: 1000 + 0.80*1000 = 1800 us  =>  value = (1800-1500)/500 =  0.60
 
 Install (Pi 5, Bookworm):
   sudo apt install -y python3-pil python3-smbus python3-gpiozero i2c-tools python3-lgpio
@@ -70,9 +70,9 @@ YAW_ESC_PIN     = 13
 
 # Servo.value maps -1..1 linearly to 1 ms..2 ms (50 Hz PWM).
 # Bidirectional ESC: neutral = 1500 us (value=0.0), forward range 1500-2000 us.
-ESC_STOPPED_VALUE   = 0.0   # 1.50 ms -- neutral, ESC arms here
-THROTTLE_ONE_VALUE  = 0.4   # 1.70 ms -- 40% forward (one button held)
-THROTTLE_BOTH_VALUE = 0.8   # 1.90 ms -- 80% forward (both buttons held)
+ESC_STOPPED_VALUE   = -1.0  # 1.00 ms -- min throttle, standard unidirectional ESC arms here
+THROTTLE_ONE_VALUE  = -0.2  # 1.40 ms -- 40% of 1000-2000 us range
+THROTTLE_BOTH_VALUE =  0.6  # 1.80 ms -- 80% of 1000-2000 us range
 
 OLED_ADDR       = 0x3C
 OLED_WIDTH      = 128
