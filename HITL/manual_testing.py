@@ -7,12 +7,14 @@ No autonomy mode, no camera, no IMU. Both buttons drive the main prop by state
 (throttle follows the button while it is held, not a toggle).
 
 Button logic (state-based, polled every loop cycle):
-  BTN1 (GPIO 4)  held alone  ->  40% forward  (1400 us)
-  BTN2 (GPIO 24) held alone  ->  40% forward  (1400 us)
-  Both held simultaneously   ->  80% forward  (1800 us)
-  Neither held               ->  stopped       (1000 us)
+  BTN1 (GPIO 4)  held alone  ->  40% forward  (1700 us)
+  BTN2 (GPIO 24) held alone  ->  40% forward  (1700 us)
+  Both held simultaneously   ->  80% forward  (1900 us)
+  Neither held               ->  neutral/stopped (1500 us)
 
-Yaw ESC (GPIO 13) is locked at stopped (1000 us) throughout.
+Yaw ESC (GPIO 13) is locked at neutral (1500 us) throughout.
+
+ESC is bidirectional: 1500 us = neutral/arm, 1500-2000 us = forward, 1000-1500 us = reverse.
 
 Peripherals tested:
   - ADS1115 ADC   (I2C 0x48): A0 -> battery 0 voltage, A1 -> battery 1 voltage
@@ -30,12 +32,13 @@ Wiring:
   Buttons     -> GPIO pin to GND (internal pull-ups enabled)
   ESC signal  -> GPIO 12 / 13 signal wire + GND wire to Pi GND (required)
 
-ESC pulse mapping (RPi.GPIO PWM, 50 Hz = 20 ms period):
+ESC pulse mapping (lgpio PWM, 50 Hz = 20 ms period):
   duty = pulse_us / 20000 * 100
-  1000 us  ->  5.0 %  ->  stopped / arm signal  (ESC_STOPPED_US)
-  1400 us  ->  7.0 %  ->  40% forward            (THROTTLE_ONE_US)
-  1800 us  ->  9.0 %  ->  80% forward            (THROTTLE_BOTH_US)
+  1500 us  ->  7.5 %  ->  neutral / arm signal   (ESC_NEUTRAL_US)
+  1700 us  ->  8.5 %  ->  40% forward            (THROTTLE_ONE_US)
+  1900 us  ->  9.5 %  ->  80% forward            (THROTTLE_BOTH_US)
   2000 us  -> 10.0 %  ->  full forward
+  1000 us  ->  5.0 %  ->  full reverse
 
 Install (Pi 5, Bookworm):
   sudo apt install -y python3-pil python3-smbus python3-lgpio \
@@ -68,9 +71,10 @@ MAIN_ESC_PIN = 12
 YAW_ESC_PIN  = 13
 
 # ESC pulse widths in microseconds. duty = us / 20000 * 100 at 50 Hz.
-ESC_STOPPED_US   = 1000   # 5.0% -- stopped, Apisqueen 100A arms here
-THROTTLE_ONE_US  = 1400   # 7.0% -- 40% forward
-THROTTLE_BOTH_US = 1800   # 9.0% -- 80% forward
+# Bidirectional ESC: neutral = 1500 us, forward > 1500, reverse < 1500.
+ESC_NEUTRAL_US   = 1500   # 7.5% -- neutral, ESC arms here
+THROTTLE_ONE_US  = 1700   # 8.5% -- 40% forward (1500 + 40% of 500 us range)
+THROTTLE_BOTH_US = 1900   # 9.5% -- 80% forward (1500 + 80% of 500 us range)
 
 OLED_ADDR       = 0x3C
 OLED_WIDTH      = 128
@@ -103,11 +107,11 @@ h = lgpio.gpiochip_open(GPIO_CHIP)
 lgpio.gpio_claim_input(h, BTN1_PIN, lgpio.SET_PULL_UP)
 lgpio.gpio_claim_input(h, BTN2_PIN, lgpio.SET_PULL_UP)
 
-# ESC PWM -- 50 Hz, start at stopped signal
+# ESC PWM -- 50 Hz, start at neutral
 lgpio.gpio_claim_output(h, MAIN_ESC_PIN)
 lgpio.gpio_claim_output(h, YAW_ESC_PIN)
-lgpio.tx_pwm(h, MAIN_ESC_PIN, 50, _duty(ESC_STOPPED_US))
-lgpio.tx_pwm(h, YAW_ESC_PIN,  50, _duty(ESC_STOPPED_US))
+lgpio.tx_pwm(h, MAIN_ESC_PIN, 50, _duty(ESC_NEUTRAL_US))
+lgpio.tx_pwm(h, YAW_ESC_PIN,  50, _duty(ESC_NEUTRAL_US))
 
 # I2C peripherals
 i2c  = busio.I2C(board.SCL, board.SDA)
@@ -153,38 +157,6 @@ def startup_checks() -> bool:
     return all_ok
 
 # ---------------------------------------------------------------------------
-# ESC calibration
-# ---------------------------------------------------------------------------
-
-def calibrate_escs() -> None:
-    """
-    One-time throttle range calibration. ESC must be UNPOWERED at the start.
-    Teaches the ESC where min (1000 us) and max (2000 us) are.
-    Only needs to be done once -- ESC saves the range internally.
-    """
-    print("\n[CAL] ========== ESC CALIBRATION ==========")
-    print("[CAL] ESC battery must be DISCONNECTED right now.")
-    input("[CAL] Press Enter when ESC is unpowered and ready...")
-
-    print("[CAL] Setting MAX throttle (2000 us, 10.0%)...")
-    lgpio.tx_pwm(h, MAIN_ESC_PIN, 50, _duty(2000))
-    lgpio.tx_pwm(h, YAW_ESC_PIN,  50, _duty(2000))
-
-    print("[CAL] --> NOW connect the ESC battery.")
-    print("[CAL]     Wait for beeps (cell-count beeps + long beep = entered cal mode).")
-    input("[CAL] Press Enter once the ESC has beeped...")
-
-    print("[CAL] Setting MIN throttle (1000 us, 5.0%)...")
-    lgpio.tx_pwm(h, MAIN_ESC_PIN, 50, _duty(1000))
-    lgpio.tx_pwm(h, YAW_ESC_PIN,  50, _duty(1000))
-
-    print("[CAL]     Wait for confirmation beeps (1-2 short beeps).")
-    input("[CAL] Press Enter once you hear the confirmation beeps...")
-
-    print("[CAL] Calibration complete -- ESC now knows the throttle range.")
-    print("[CAL] ==========================================\n")
-
-# ---------------------------------------------------------------------------
 # OLED
 # ---------------------------------------------------------------------------
 
@@ -225,15 +197,12 @@ def main() -> None:
 
     startup_checks()
 
-    if input("Run ESC calibration? (y/N): ").strip().lower() == 'y':
-        calibrate_escs()
-
-    print(f"[ESC] Outputting {ESC_STOPPED_US} us ({_duty(ESC_STOPPED_US):.1f}%) -- power on ESC now.")
-    print("[ESC] Listen for arm beep, then press Enter.")
+    print(f"[ESC] Sending neutral ({ESC_NEUTRAL_US} us, {_duty(ESC_NEUTRAL_US):.1f}%) -- power on ESC now.")
+    print("[ESC] Wait for arm beeps, then press Enter.")
     input("[ESC] Press Enter when ESC is armed: ")
-    print("[ESC] Proceeding. Yaw locked.\n")
+    print("[ESC] Armed. Yaw locked.\n")
 
-    last_thr_us = ESC_STOPPED_US
+    last_thr_us = ESC_NEUTRAL_US
 
     try:
         while True:
@@ -263,7 +232,7 @@ def main() -> None:
                 thr_us    = THROTTLE_ONE_US
                 thr_label = f"40%  [{'1' if b1 else '2'}]"
             else:
-                thr_us    = ESC_STOPPED_US
+                thr_us    = ESC_NEUTRAL_US
                 thr_label = "0%"
 
             # only write to ESC when throttle level actually changes
@@ -284,8 +253,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nShutting down.")
     finally:
-        lgpio.tx_pwm(h, MAIN_ESC_PIN, 50, _duty(ESC_STOPPED_US))
-        lgpio.tx_pwm(h, YAW_ESC_PIN,  50, _duty(ESC_STOPPED_US))
+        lgpio.tx_pwm(h, MAIN_ESC_PIN, 50, _duty(ESC_NEUTRAL_US))
+        lgpio.tx_pwm(h, YAW_ESC_PIN,  50, _duty(ESC_NEUTRAL_US))
         clear_oled()
         lgpio.gpiochip_close(h)
 
