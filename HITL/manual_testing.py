@@ -198,8 +198,9 @@ def main() -> None:
     startup_checks()
 
     print(f"[ESC] Sending neutral ({ESC_NEUTRAL_US} us, {_duty(ESC_NEUTRAL_US):.1f}%) -- power on ESC now.")
-    print("[ESC] Wait for arm beeps, then press Enter.")
-    input("[ESC] Press Enter when ESC is armed: ")
+    for i in range(5, 0, -1):
+        print(f"[ESC] Proceeding in {i}s...")
+        time.sleep(1)
     print("[ESC] Armed. Yaw locked.\n")
 
     last_thr_us = ESC_NEUTRAL_US
